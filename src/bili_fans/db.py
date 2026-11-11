@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS fan_event (
 );
 CREATE INDEX IF NOT EXISTS idx_fan_event_owner_ts ON fan_event (owner_uid, ts);
 
+-- 每次抓到的完整名单（原样留档，逐次可回看/可导出）
+CREATE TABLE IF NOT EXISTS fan_snapshot (
+    crawl_id  INTEGER NOT NULL,
+    owner_uid INTEGER NOT NULL,
+    fan_uid   INTEGER NOT NULL,
+    uname     TEXT NOT NULL DEFAULT '',
+    mtime     INTEGER,
+    PRIMARY KEY (crawl_id, fan_uid)
+);
+CREATE INDEX IF NOT EXISTS idx_fan_snapshot_owner ON fan_snapshot (owner_uid, fan_uid);
+
 -- 每次抓取留痕：抓了多少、是否完整，出问题时用来排查
 CREATE TABLE IF NOT EXISTS fan_crawl (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,6 +260,7 @@ def clear_account_data(conn: sqlite3.Connection, uid: int) -> int:
         n += conn.execute(f"DELETE FROM {table} WHERE uid = ?", (uid,)).rowcount
     for table in ("fan", "fan_event"):
         n += conn.execute(f"DELETE FROM {table} WHERE owner_uid = ?", (uid,)).rowcount
+    n += conn.execute("DELETE FROM fan_snapshot WHERE owner_uid = ?", (uid,)).rowcount
     n += conn.execute("DELETE FROM fan_crawl WHERE owner_uid = ?", (uid,)).rowcount
     conn.commit()
     return n
@@ -554,3 +566,58 @@ def recent_crawls(conn: sqlite3.Connection, owner_uid: int, limit: int = 5) -> l
         )
         for r in rows
     ]
+
+
+# ---------- 逐次抓取的完整名单 ----------
+
+
+def save_fan_snapshot(conn: sqlite3.Connection, crawl_id: int, owner_uid: int, fans: Iterable) -> int:
+    """把这一次抓到的名单原样存一份。重复执行同一次抓取会覆盖。"""
+    rows = [(int(crawl_id), owner_uid, f.mid, f.uname, f.mtime or None) for f in fans]
+    if not rows:
+        return 0
+    conn.executemany(
+        """INSERT INTO fan_snapshot (crawl_id, owner_uid, fan_uid, uname, mtime)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(crawl_id, fan_uid) DO UPDATE SET
+             uname = excluded.uname, mtime = excluded.mtime""",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def snapshot_fans(
+    conn: sqlite3.Connection,
+    crawl_id: int,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    query: str = "",
+) -> tuple[list[tuple[int, str, int | None]], int]:
+    """读某一次抓取的名单：(fan_uid, uname, mtime) + 总数。"""
+    where = ["crawl_id = ?"]
+    params: list[object] = [int(crawl_id)]
+    query = (query or "").strip()
+    if query:
+        where.append("(uname LIKE ? OR CAST(fan_uid AS TEXT) LIKE ?)")
+        params.extend([f"%{query}%", f"%{query}%"])
+    clause = " AND ".join(where)
+
+    total = int(conn.execute(f"SELECT COUNT(*) AS n FROM fan_snapshot WHERE {clause}", params).fetchone()["n"])
+    rows = conn.execute(
+        f"""SELECT fan_uid, uname, mtime FROM fan_snapshot WHERE {clause}
+            ORDER BY mtime DESC, fan_uid LIMIT ? OFFSET ?""",
+        [*params, int(limit), int(offset)],
+    ).fetchall()
+    return [(r["fan_uid"], r["uname"], r["mtime"]) for r in rows], total
+
+
+def snapshot_counts(conn: sqlite3.Connection, owner_uid: int, limit: int = 20) -> list[tuple[int, int]]:
+    """最近几次抓取各存了多少人：[(crawl_id, 人数), ...]。"""
+    rows = conn.execute(
+        """SELECT crawl_id, COUNT(*) AS n FROM fan_snapshot
+           WHERE owner_uid = ? GROUP BY crawl_id ORDER BY crawl_id DESC LIMIT ?""",
+        (owner_uid, int(limit)),
+    ).fetchall()
+    return [(r["crawl_id"], int(r["n"])) for r in rows]

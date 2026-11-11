@@ -145,3 +145,46 @@ def test_recent_crawls(conn):
     rows = recent_crawls(conn, 7, limit=5)
     assert [r.fetched for r in rows] == [10, 30]     # 新的在前
     assert rows[0].complete is False and rows[0].note == "撞上限"
+
+
+# ---------- 逐次抓取的名单留档 ----------
+
+
+def test_save_and_read_snapshot(conn):
+    from bili_fans.db import (save_fan_snapshot, snapshot_counts, snapshot_fans)
+
+    cid = start_fan_crawl(conn, 7, 100)
+    fans = [Fan(mid=3000 + i, uname=f"粉丝{i:02d}", mtime=1_700_000_000 + i) for i in range(5)]
+    assert save_fan_snapshot(conn, cid, 7, fans) == 5
+
+    rows, total = snapshot_fans(conn, cid)
+    assert total == 5 and len(rows) == 5
+    assert rows[0][0] == 3004                     # 关注时间新的在前
+
+    rows, total = snapshot_fans(conn, cid, query="粉丝01")
+    assert total == 1 and rows[0][1] == "粉丝01"
+
+    assert snapshot_counts(conn, 7) == [(cid, 5)]
+
+
+def test_snapshot_is_per_crawl(conn):
+    from bili_fans.db import save_fan_snapshot, snapshot_fans
+
+    c1 = start_fan_crawl(conn, 7, 100)
+    save_fan_snapshot(conn, c1, 7, [Fan(mid=i, uname=f"f{i}") for i in (1, 2, 3)])
+    c2 = start_fan_crawl(conn, 7, 200)
+    save_fan_snapshot(conn, c2, 7, [Fan(mid=i, uname=f"f{i}") for i in (1, 2)])
+
+    _, t1 = snapshot_fans(conn, c1)
+    _, t2 = snapshot_fans(conn, c2)
+    assert (t1, t2) == (3, 2)      # 两次抓取各自留档，互不影响
+
+
+def test_snapshot_dedupes_within_one_crawl(conn):
+    from bili_fans.db import save_fan_snapshot, snapshot_fans
+
+    cid = start_fan_crawl(conn, 7, 100)
+    save_fan_snapshot(conn, cid, 7, [Fan(mid=1, uname="a")])
+    save_fan_snapshot(conn, cid, 7, [Fan(mid=1, uname="a")])
+    _, total = snapshot_fans(conn, cid)
+    assert total == 1

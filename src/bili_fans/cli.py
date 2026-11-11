@@ -28,13 +28,16 @@ from .db import (
     last_snapshot,
     latest_fan_crawl,
     list_accounts,
+    recent_crawls,
     snapshot_count,
+    snapshot_counts,
+    snapshot_fans,
     upsert_account,
 )
 from .demo import seed_demo, seed_fans
 from .fans import crawl, summarize_churn, survival_days
 from .http import HttpError, Transport
-from .report import render_churn, render_fan_list, render_html, render_text, write_html
+from .report import pad, render_churn, render_fan_list, render_html, render_text, write_html
 from .service import backfill_account, collect, poll_account, resolve_cookie
 from .timeutil import day_start_ts, fmt_ts, get_tz, local_day, now_ts, to_local
 
@@ -160,6 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--search", default="", help="配合 --list，按昵称或 UID 搜索")
     sp.add_argument("--page", type=int, default=1, help="配合 --list 翻页")
     sp.add_argument("--page-size", type=int, default=50, help="配合 --list，每页条数")
+    sp.add_argument("--history", action="store_true", help="列出历次抓取的记录")
+    sp.add_argument("--crawl", type=int, default=0, help="配合 --list/--csv，读某一次抓取的快照")
+    sp.add_argument("--csv", default="", help="导出名单到 CSV 文件")
     sp.set_defaults(func=cmd_fans)
 
     sp = sub.add_parser("churn", parents=[common], help="查看具体是谁取关了你")
@@ -646,6 +652,10 @@ def cmd_whoami(ctx: Ctx) -> int:
 
 
 def cmd_fans(ctx: Ctx) -> int:
+    if ctx.args.history:
+        return cmd_fan_history(ctx)
+    if ctx.args.csv:
+        return cmd_fan_export(ctx)
     if ctx.args.list:
         return cmd_fan_list(ctx)
 
@@ -703,11 +713,94 @@ def cmd_fans(ctx: Ctx) -> int:
     return rc
 
 
+def cmd_fan_history(ctx: Ctx) -> int:
+    """每次抓取都留了一份名单，这里列出留了哪些。"""
+    accounts = ctx.targets()
+    for i, acc in enumerate(accounts):
+        if i:
+            print()
+        crawls = recent_crawls(ctx.conn, acc.uid, limit=20)
+        counts = dict(snapshot_counts(ctx.conn, acc.uid, limit=50))
+        print("─" * 78)
+        print(f" {acc.label} 的抓取记录")
+        print("─" * 78)
+        if not crawls:
+            print("  还没有抓取记录。执行 bilifans fans 抓一次。")
+            print("─" * 78)
+            continue
+        print(pad("抓取ID", 8, "right") + "  " + pad("时间", 18) + pad("抓到", 8, "right")
+              + pad("接口总数", 10, "right") + pad("留档", 8, "right") + "  状态")
+        for c in crawls:
+            when = to_local(c.started_ts, ctx.tz).strftime("%Y-%m-%d %H:%M")
+            note = "完整" if c.complete else (c.note or "不完整")
+            print(
+                pad(str(c.id), 8, "right") + "  " + pad(when, 18)
+                + pad(f"{c.fetched:,}", 8, "right")
+                + pad(f"{c.total:,}" if c.total else "—", 10, "right")
+                + pad(f"{counts.get(c.id, 0):,}", 8, "right")
+                + "  " + note
+            )
+        print("─" * 78)
+        print("  看某一次的名单：bilifans fans --list --crawl <抓取ID>")
+    return 0
+
+
+def cmd_fan_export(ctx: Ctx) -> int:
+    """把名单导出成 CSV（Excel 能直接打开）。"""
+    import csv
+
+    accounts = ctx.targets()
+    crawl_id = ctx.args.crawl or 0
+    target = Path(ctx.args.csv).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with target.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["UID", "昵称", "关注时间", "状态", "首次记录", "最后记录", "取关时间", "抓取ID"])
+        rows_written = 0
+        for acc in accounts:
+            if crawl_id:
+                items, _ = snapshot_fans(ctx.conn, crawl_id, limit=100000, offset=0)
+                for uid, uname, mtime in items:
+                    writer.writerow([
+                        uid, uname,
+                        to_local(mtime, ctx.tz).strftime("%Y-%m-%d") if mtime else "",
+                        "该次在列", "", "", "", crawl_id,
+                    ])
+                    rows_written += 1
+                continue
+
+            offset = 0
+            while True:
+                batch, _total = fan_page(ctx.conn, acc.uid, limit=1000, offset=offset)
+                if not batch:
+                    break
+                for r in batch:
+                    writer.writerow([
+                        r.fan_uid, r.uname,
+                        to_local(r.mtime, ctx.tz).strftime("%Y-%m-%d") if r.mtime else "",
+                        "已取关" if not r.active else ("互粉" if r.attribute == 6 else "在关注"),
+                        to_local(r.first_seen_ts, ctx.tz).strftime("%Y-%m-%d %H:%M"),
+                        to_local(r.last_seen_ts, ctx.tz).strftime("%Y-%m-%d %H:%M"),
+                        to_local(r.gone_ts, ctx.tz).strftime("%Y-%m-%d %H:%M") if r.gone_ts else "",
+                        "",
+                    ])
+                    rows_written += 1
+                offset += 1000
+
+    ctx.say(f"✓ 已导出 {rows_written} 条到 {target}")
+    return 0
+
+
 def cmd_fan_list(ctx: Ctx) -> int:
     accounts = ctx.targets()
     size = max(1, min(500, ctx.args.page_size))
     page = max(1, ctx.args.page)
     rc = 0
+    crawl_id = ctx.args.crawl or 0
+    if crawl_id:
+        return _list_snapshot(ctx, accounts, crawl_id)
+
     for i, acc in enumerate(accounts):
         totals = fan_totals(ctx.conn, acc.uid)
         rows, total = fan_page(
@@ -734,6 +827,42 @@ def cmd_fan_list(ctx: Ctx) -> int:
         if totals.get("all", 0) == 0:
             rc = 1
     return rc
+
+
+def _list_snapshot(ctx: Ctx, accounts, crawl_id: int) -> int:
+    """看某一次抓取留下来的名单（当时在列的人），不是当前状态。"""
+    size = max(1, min(500, ctx.args.page_size))
+    page = max(1, ctx.args.page)
+    rows, total = snapshot_fans(
+        ctx.conn,
+        crawl_id,
+        limit=size,
+        offset=(page - 1) * size,
+        query=ctx.args.search,
+    )
+    crawl = next((c for c in recent_crawls(ctx.conn, accounts[0].uid, limit=200) if c.id == crawl_id), None)
+    when = to_local(crawl.started_ts, ctx.tz).strftime("%Y-%m-%d %H:%M") if crawl else "未知时间"
+
+    width = 78
+    print("─" * width)
+    print(f" 抓取 #{crawl_id} 的名单 · {when} · 共 {total:,} 人")
+    print("─" * width)
+    if not rows:
+        print("  这次抓取没有留下记录（可能早于本功能上线）。")
+        print("─" * width)
+        return 0
+
+    print(pad("昵称", 24) + pad("UID", 12, "right") + "  " + pad("关注时间", 12))
+    print("─" * width)
+    for fan_uid, uname, mtime in rows:
+        followed = to_local(mtime, ctx.tz).strftime("%Y-%m-%d") if mtime else "—"
+        print(pad(uname or "（已注销）", 24) + pad(str(fan_uid), 12, "right") + "  " + pad(followed, 12))
+    print("─" * width)
+    pages = max(1, (total + size - 1) // size)
+    print(f"  第 {page}/{pages} 页，本页 {len(rows)} 条（用 --page 翻页）")
+    print("  这是那次抓取的留档，反映的是当时的状态。")
+    print("─" * width)
+    return 0
 
 
 def cmd_churn(ctx: Ctx) -> int:

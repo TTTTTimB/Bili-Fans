@@ -268,3 +268,42 @@ def test_manual_cookie_rejects_garbage(env, monkeypatch, tmp_path):
     status, body = request(env, "/api/cookie", method="POST", body={"text": "hello"})
     assert status == 400
     assert "SESSDATA" in json.loads(body)["error"]
+
+
+def test_fans_endpoint_snapshot_mode(env):
+    """看某一次抓取留档的名单。"""
+    from bili_fans.api import Fan
+    from bili_fans.db import connect, save_fan_snapshot, start_fan_crawl
+
+    conn = connect(env["db"])
+    try:
+        cid = start_fan_crawl(conn, 100, 1_700_000_000)
+        save_fan_snapshot(conn, cid, 100, [Fan(mid=9000 + i, uname=f"存档{i}", mtime=1_700_000_000 + i) for i in range(4)])
+    finally:
+        conn.close()
+
+    status, body = request(env, f"/api/fans?crawl={cid}")
+    assert status == 200
+    data = json.loads(body)
+    assert data["mode"] == "snapshot" and data["crawl"] == cid
+    assert data["total"] == 4
+    assert all(it["uname"].startswith("存档") for it in data["items"])
+
+    # 搜索也支持
+    _, body = request(env, f"/api/fans?crawl={cid}&q=存档2")
+    assert json.loads(body)["total"] == 1
+
+
+def test_overview_lists_crawl_ids(env):
+    from bili_fans.db import connect, finish_fan_crawl, start_fan_crawl
+
+    conn = connect(env["db"])
+    try:
+        cid = start_fan_crawl(conn, 100, 1_700_000_000)
+        finish_fan_crawl(conn, cid, fetched=10, total=10, complete=True, ts=1_700_000_100)
+    finally:
+        conn.close()
+
+    _, body = request(env, "/api/overview")
+    crawls = json.loads(body)["meta"]["crawls"]
+    assert crawls and crawls[0]["id"] == cid

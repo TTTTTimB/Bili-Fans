@@ -6,8 +6,8 @@ import random
 import time
 from datetime import date, timedelta
 
-from .api import CreatorDay
-from .db import add_snapshots_bulk, upsert_creator_days
+from .api import CreatorDay, Fan
+from .db import add_snapshots_bulk, save_fan_snapshot, upsert_creator_days
 from .timeutil import day_start_ts
 
 # 一天 24 小时按 10 分钟切 144 段，涨粉在晚上更集中，掉粉相对均匀
@@ -141,4 +141,21 @@ def seed_fans(conn, owner_uid: int, *, now: int, count: int = 140, churn: int = 
         crawls,
     )
     conn.commit()
+
+    # 给最近一次抓取也留一份名单快照，这样演示数据里能直接看到「历次抓取」
+    row = conn.execute(
+        "SELECT id FROM fan_crawl WHERE owner_uid = ? ORDER BY id DESC LIMIT 1", (owner_uid,)
+    ).fetchone()
+    if row:
+        alive = [
+            Fan(mid=mid, uname=uname, mtime=followed)
+            for mid, uname, followed, gone in (
+                (r[0], r[1], r[2], r[3]) for r in
+                conn.execute(
+                    "SELECT fan_uid, uname, mtime, gone_ts FROM fan WHERE owner_uid = ? AND gone_ts IS NULL",
+                    (owner_uid,),
+                )
+            )
+        ]
+        save_fan_snapshot(conn, row["id"], owner_uid, alive)
     return {"fans": count, "gone": len(events)}

@@ -22,6 +22,7 @@ from typing import Callable, Sequence
 from .api import BiliClient, Fan, FanPage
 from .db import (
     ChurnRow,
+    save_fan_snapshot,
     finish_fan_crawl,
     latest_fan_crawl,
     mark_missing_gone,
@@ -130,6 +131,8 @@ def crawl(
     outcome.new_fans = upsert_fans(
         conn, owner_uid, fans, started, crawl_id, emit_events=not outcome.baseline
     )
+    # 这一次读到的名单原样存一份，之后可以回看「某次到底抓到了谁」
+    save_fan_snapshot(conn, crawl_id, owner_uid, fans)
 
     # 只有在「这次确实抓全了」或「至少和上次差不多多」时才敢判定取关，
     # 否则一次失败的抓取会把所有人都标成取关。

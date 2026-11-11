@@ -31,6 +31,7 @@ from .db import (
     list_accounts,
     recent_crawls,
     snapshot_count,
+    snapshot_fans,
     upsert_account,
 )
 from .fans import crawl as crawl_fans
@@ -205,6 +206,7 @@ def build_overview(conn, days: int, cfg: Config, tz, cookie: str) -> dict[str, A
                 "crawl_complete": bool(crawl_row and crawl_row.complete),
                 "crawls": [
                     {
+                        "id": c.id,
                         "at": _fmt_ts(c.started_ts, tz),
                         "fetched": c.fetched,
                         "total": c.total,
@@ -374,6 +376,31 @@ class AppHandler(BaseHTTPRequestHandler):
                     size = min(200, max(1, int(q.get("size") or 50)))
                 except ValueError:
                     size = 50
+                crawl = self._uid(q.get("crawl"))
+                if crawl:
+                    # 看某一次抓取留档的名单（当时在列），不是当前状态
+                    snapshot, total = snapshot_fans(
+                        conn, crawl, limit=size, offset=(page - 1) * size, query=q.get("q", "")
+                    )
+                    totals = {"all": total, "active": total, "gone": 0}
+                    rows = [
+                        {
+                            "uid": fan_uid,
+                            "uname": uname or "（已注销）",
+                            "followed": to_local(mtime, self.tz).strftime("%Y-%m-%d") if mtime else "—",
+                            "gone": "",
+                            "last_seen": "",
+                            "active": True,
+                            "mutual": False,
+                        }
+                        for fan_uid, uname, mtime in snapshot
+                    ]
+                    self._json({
+                        "uid": uid, "status": "all", "mode": "snapshot", "crawl": crawl,
+                        "page": page, "size": size, "total": total, "totals": totals, "items": rows,
+                    })
+                    return
+
                 rows, total = fan_page(
                     conn, uid, status=status, query=q.get("q", ""), limit=size, offset=(page - 1) * size
                 )
@@ -383,6 +410,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json({
                 "uid": uid,
                 "status": status,
+                "mode": "live",
                 "page": page,
                 "size": size,
                 "total": total,
@@ -697,7 +725,7 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 <script>
 const $ = (s) => document.querySelector(s);
 const state = {days: 30, loading: false, job: null, cookieOk: false,
-               fan: {q: "", status: "all", page: 1}};
+               fan: {q: "", status: "all", page: 1, crawl: 0}};
 
 const nf = (n) => (n === null || n === undefined) ? "—" : n.toLocaleString("zh-CN");
 const signed = (n) => (n === null || n === undefined) ? "—" : (n > 0 ? "+" : "") + n.toLocaleString("zh-CN");
@@ -984,11 +1012,11 @@ function render(d) {
   app.appendChild(tab);
 
   state.cookieOk = d.cookie_ok;
-  app.appendChild(renderFansShell());
+  app.appendChild(renderFansShell(d));
   loadFans();
 }
 
-function renderFansShell() {
+function renderFansShell(d) {
   const sec = el("section");
   const h = el("h2", "", "粉丝名单");
   const pill = el("span", "pill", "");
@@ -1022,6 +1050,25 @@ function renderFansShell() {
     seg.appendChild(b);
   }
   bar.appendChild(seg);
+  const crawlSel = el("select");
+  crawlSel.id = "fanCrawl";
+  crawlSel.title = "查看某一次抓取留档的名单";
+  const live = el("option", "", "当前名单");
+  live.value = "0";
+  crawlSel.appendChild(live);
+  for (const c of ((d.meta && d.meta.crawls) || [])) {
+    const opt = el("option", "", `${c.at} · 抓到 ${c.fetched} 人`);
+    opt.value = String(c.id);
+    crawlSel.appendChild(opt);
+  }
+  crawlSel.value = String(state.fan.crawl || 0);
+  crawlSel.onchange = () => {
+    state.fan.crawl = Number(crawlSel.value);
+    state.fan.page = 1;
+    loadFans();
+  };
+  bar.appendChild(crawlSel);
+
   bar.appendChild(el("span", "grow"));
   const pager = el("span", "pager");
   pager.id = "fanPager";
@@ -1048,13 +1095,17 @@ async function loadFans() {
   if (!holder) return;
   const q = new URLSearchParams({status: state.fan.status, page: state.fan.page, size: 50});
   if (state.fan.q) q.set("q", state.fan.q);
+  if (state.fan.crawl) q.set("crawl", state.fan.crawl);
 
   let d;
   try { d = await api("/api/fans?" + q.toString()); }
   catch (e) { holder.textContent = "读取名单失败：" + e.message; return; }
 
   const t = d.totals || {all: 0, active: 0, gone: 0};
-  $("#fanCount").textContent = t.all ? `共 ${nf(t.all)} 人 · 在关注 ${nf(t.active)} · 已取关 ${nf(t.gone)}` : "";
+  const snap = d.mode === "snapshot";
+  $("#fanCount").textContent = snap
+    ? `该次抓取留档 ${nf(t.all)} 人`
+    : (t.all ? `共 ${nf(t.all)} 人 · 在关注 ${nf(t.active)} · 已取关 ${nf(t.gone)}` : "");
 
   holder.textContent = "";
   if (!d.items.length) {
@@ -1076,10 +1127,14 @@ async function loadFans() {
     tr.appendChild(el("td", "", it.uid));
     tr.appendChild(el("td", "", it.followed));
     const st = el("td");
-    st.appendChild(el("span", "tag " + (it.active ? "exact" : "none"),
-                      it.active ? (it.mutual ? "互粉" : "在关注") : "已取关"));
+    if (snap) {
+      st.appendChild(el("span", "tag exact", "该次在列"));
+    } else {
+      st.appendChild(el("span", "tag " + (it.active ? "exact" : "none"),
+                        it.active ? (it.mutual ? "互粉" : "在关注") : "已取关"));
+    }
     tr.appendChild(st);
-    tr.appendChild(el("td", "", it.active ? it.last_seen : it.gone));
+    tr.appendChild(el("td", "", snap ? "" : (it.active ? it.last_seen : it.gone)));
     tb.appendChild(tr);
   }
   table.appendChild(tb);

@@ -334,6 +334,9 @@ export BILI_COOKIE='SESSDATA=...'
   标题旁直接写着 `共 713 人 · 在关注 701 · 已取关 12`
 
   <img src="examples/gui_fans.png" width="720" alt="粉丝名单">
+
+  右侧下拉可以切到**历次抓取的留档**：每次抓取都把读到的完整名单另存一份，
+  想看「上周三那次到底抓到了谁」直接选就行。
 - **最近抓取记录**（采集区下方）：每次抓到多少人、是否完整，一眼看出抓取成没成功
 - **登录 B 站**：点按钮弹出浏览器窗口扫码，日志实时显示进度；没登录时「回填 / 抓粉丝」会自动置灰
 
@@ -393,6 +396,8 @@ fan(owner_uid, fan_uid, uname, mtime,                 -- 当前/曾经关注的�
 fan_event(owner_uid, fan_uid, kind, ts, uname)        -- follow / unfollow 流水
 fan_crawl(owner_uid, started_ts, fetched, total,      -- 每次抓取的留痕，用来判断是否可信
           complete, note)
+fan_snapshot(crawl_id, owner_uid, fan_uid, uname,      -- 每次抓到的完整名单，逐次留档
+             mtime)
 meta(k, v)                                            -- 杂项
 ```
 
@@ -420,6 +425,9 @@ bilifans report [--days 30] [--json]   # 终端表格
 bilifans export [--days 30] [-o x.html]# 生成网页报告
 bilifans fans [--all] [--limit 1000]   # 抓一次粉丝名单，和上次比对出取关（需 Cookie）
 bilifans fans --list [--status gone]   # 看已存的全量名单（--search 搜昵称/UID，--page 翻页）
+bilifans fans --history                # 历次抓取记录（抓了多少、留档多少、是否完整）
+bilifans fans --list --crawl <ID>      # 看某一次抓取留档的名单
+bilifans fans --csv out.csv            # 导出名单（加 --crawl <ID> 导出某次留档）
 bilifans churn [--days 7] [--json]     # 看具体是谁取关了你
 bilifans probe [--uid N]               # 打印接口原始 JSON，排查字段变化
 bilifans daemon [--interval 5]         # 常驻定时采集
