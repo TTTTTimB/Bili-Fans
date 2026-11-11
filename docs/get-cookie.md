@@ -41,8 +41,12 @@ bilifans serve
 新版已经处理了常见的几个原因：
 
 - **直接打开登录页**（`passport.bilibili.com/login`），不再先开首页再找入口
-- 关掉了首启后台任务：`--no-service-autorun --disable-sync --disable-background-networking
-  --disable-component-update --disable-extensions --use-mock-keychain`
+- **窗口自动提到最前**，并关掉 Chrome 的后台/遮挡节流
+  （`--disable-background-timer-throttling --disable-renderer-backgrounding
+  --disable-backgrounding-occluded-windows --disable-features=…CalculateNativeWinOcclusion`）：
+  窗口一旦失去焦点，macOS 可能判定「被遮挡」并暂停渲染，表现就是**只有蓝色顶栏、登录框永远不出来**
+- 关掉了首启后台任务：`--no-service-autorun --disable-sync --disable-component-update
+  --disable-extensions --use-mock-keychain`
 - 导航后会等 `document.readyState === 'complete'` 再开始读 Cookie，并打印「登录页加载完成」
 
 如果还是慢，多半是网络到 `passport.bilibili.com` 的问题，可以：

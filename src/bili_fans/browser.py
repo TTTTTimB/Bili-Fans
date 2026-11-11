@@ -68,18 +68,50 @@ class ChromeCDP:
     """最小可用的 Chrome DevTools Protocol 客户端（pipe 模式）。"""
 
     def __init__(self, chrome: str, profile_dir: Path, *, url: str = DEFAULT_URL, headless: bool = False,
-                 timeout: float = 30.0):
+                 timeout: float = 30.0, extra_args: list[str] | None = None):
         self.chrome = chrome
         self.profile_dir = Path(profile_dir)
         self.url = url
         self.headless = headless
         self.timeout = timeout
+        self.extra_args = list(extra_args or [])
         self.proc: subprocess.Popen | None = None
         self._buf = b""
         self._next_id = 0
         self._in = -1
         self._out = -1
         self._session: str | None = None
+
+    def build_args(self) -> list[str]:
+        args = [
+            str(self.chrome),
+            f"--user-data-dir={self.profile_dir}",
+            "--remote-debugging-pipe",
+            "--no-first-run",
+            "--no-default-browser-check",
+            # 首次启动时的后台任务、扩展加载、组件更新、钥匙串弹窗，
+            # 都会让「窗口开了但页面一直转圈」
+            "--no-service-autorun",
+            "--disable-sync",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-client-side-phishing-detection",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            # macOS 会把「被遮挡」的窗口判成不可见并暂停渲染，登录框就一直不出现
+            "--disable-features=Translate,MediaRouter,OptimizationHints,"
+            "InterestFeedContentSuggestions,CalculateNativeWinOcclusion",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+        ]
+        if self.headless:
+            args += ["--headless=new", "--disable-gpu"]
+        args += self.extra_args
+        args.append(self.url)
+        return args
 
     # ---------- 生命周期 ----------
 
@@ -99,30 +131,7 @@ class ChromeCDP:
 
         read_fd, write_fd = os.pipe()   # 浏览器读 fd3
         out_fd, sink_fd = os.pipe()     # 浏览器写 fd4
-        args = [
-            str(self.chrome),
-            f"--user-data-dir={self.profile_dir}",
-            "--remote-debugging-pipe",
-            "--no-first-run",
-            "--no-default-browser-check",
-            # 下面这些是「窗口开了但页面一直转圈」的常见元凶：
-            # 首次启动时的后台任务、扩展加载、组件更新、钥匙串弹窗
-            "--no-service-autorun",
-            "--disable-sync",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--disable-extensions",
-            "--disable-client-side-phishing-detection",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "--disable-features=Translate,MediaRouter,OptimizationHints,InterestFeedContentSuggestions",
-            "--no-proxy-server",
-            self.url,
-        ]
-        if self.headless:
-            args.insert(-1, "--headless=new")
-            args.insert(-1, "--disable-gpu")
+        args = self.build_args()
 
         # 用 sh 把 0/1 重定向成 fd3/fd4：Python 的 preexec_fn 在关 fd 之前执行，
         # 直接 dup2 会被随后的 close_fds 关掉，所以交给 shell 做。
@@ -238,6 +247,14 @@ class ChromeCDP:
         session = self._session or self.attach_page()
         try:
             self.call("Page.navigate", {"url": url}, session=session, timeout=10)
+        except (BrowserError, TimeoutError):
+            pass
+
+    def bring_to_front(self) -> None:
+        """把窗口提到最前，避免 macOS 判定「被遮挡」而暂停渲染。"""
+        session = self._session or self.attach_page()
+        try:
+            self.call("Page.bringToFront", session=session, timeout=5)
         except (BrowserError, TimeoutError):
             pass
 
@@ -362,6 +379,7 @@ def capture_cookie(
         progress("浏览器已启动，正在打开登录页…")
         cdp.attach_page()
         cdp.navigate(url)  # 失败也无所谓，cookie 照样能读
+        cdp.bring_to_front()
         if cdp.wait_ready(timeout=20):
             progress("登录页加载完成，等待扫码…")
         else:

@@ -87,6 +87,9 @@ class FakeCDP:
     def wait_ready(self, timeout=25.0):
         return True
 
+    def bring_to_front(self):
+        self.front = True
+
     def cookies(self):
         self.polls += 1
         base = [{"name": "buvid3", "value": "b3", "domain": ".bilibili.com"}]
@@ -166,3 +169,39 @@ def test_resolve_cookie_priority(tmp_path, monkeypatch):
     assert resolve_cookie(cfg) == ("SESSDATA=fromenv", "环境变量 BILI_COOKIE")
 
     assert resolve_cookie(cfg, "SESSDATA=fromcli") == ("SESSDATA=fromcli", "--cookie")
+
+
+def test_chrome_args_disable_background_throttling(tmp_path):
+    """窗口被切到后台时，Chrome 默认会节流渲染，登录框就一直不出现。"""
+    cdp = br.ChromeCDP("/fake/chrome", tmp_path, headless=False)
+    args = cdp.build_args()
+
+    for flag in (
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+    ):
+        assert flag in args
+    assert any("CalculateNativeWinOcclusion" in a for a in args)
+    # 不能替用户关代理，否则挂了代理的网络直接打不开
+    assert "--no-proxy-server" not in args
+    assert args[-1] == br.DEFAULT_URL
+
+
+def test_chrome_args_headless(tmp_path):
+    args = br.ChromeCDP("/fake/chrome", tmp_path, headless=True).build_args()
+    assert "--headless=new" in args and "--disable-gpu" in args
+    assert args[-1] == br.DEFAULT_URL
+
+
+def test_capture_brings_window_to_front(tmp_path):
+    FakeCDP.instances = []
+    br.capture_cookie(
+        "/tmp/fake-profile", chrome="/fake/chrome", timeout=5, poll=0,
+        client_factory=FakeCDP,
+    )
+    assert FakeCDP.instances[0].front is True
+
+
+def test_default_url_is_login_page():
+    assert br.DEFAULT_URL == "https://passport.bilibili.com/login"
