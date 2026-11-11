@@ -47,7 +47,7 @@ export PYTHONPATH="{project}/src"
 LOG="$HOME/.bilifans/app.log"
 mkdir -p "$HOME/.bilifans"
 
-"{python}" -m bili_fans serve --port {port} >>"$LOG" 2>&1
+"{python}" -m bili_fans serve --port {port} --restart >>"$LOG" 2>&1
 code=$?
 
 # 双击启动失败时给个弹窗，不然 Finder 里会「闪一下就没了」。

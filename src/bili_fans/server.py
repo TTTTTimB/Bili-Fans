@@ -37,6 +37,7 @@ from .fans import crawl as crawl_fans
 from .fans import summarize_churn, survival_days
 from .http import HttpError, Transport
 from .report import bar_chart_svg, line_chart_svg
+from .runtime import clear_pid_file, stop_running, wait_port_free, write_pid_file
 from .service import backfill_account, collect, ensure_account, poll_account, resolve_cookie
 from .timeutil import day_start_ts, get_tz, local_day, now_ts, to_local
 
@@ -1172,8 +1173,16 @@ def serve(
     port: int = DEFAULT_PORT,
     cookie: str = "",
     open_browser: bool = True,
+    restart: bool = False,
 ) -> int:
     url = f"http://{host}:{port}/"
+
+    if restart:
+        # App 每次打开都走这里：先停旧的，保证跑的是刚改完的代码
+        for note in stop_running(port):
+            print(f"  {note}", flush=True)
+        wait_port_free(port, probe=lambda: running_health(port, host, 0.5) is not None)
+
     health = running_health(port, host)
     if health is not None:
         print(f"看板已经在运行：{url}", flush=True)
@@ -1188,6 +1197,7 @@ def serve(
 
     httpd, actual = make_server(cfg, host=host, port=port, cookie=cookie)
     url = f"http://{host}:{actual}/"
+    write_pid_file(actual)
     print(f"网页看板已启动：{url}", flush=True)
     print(f"  数据库 {cfg.db_path()}", flush=True)
     print(f"  Cookie {'已配置' if cookie else '未配置（只能看估算值）'}", flush=True)
@@ -1200,4 +1210,5 @@ def serve(
         print("\n已停止")
     finally:
         httpd.server_close()
+        clear_pid_file()
     return 0

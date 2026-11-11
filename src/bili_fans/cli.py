@@ -142,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--port", type=int, default=8787, help="监听端口，默认 8787")
     sp.add_argument("--host", default="127.0.0.1", help="监听地址，默认只监听本机")
     sp.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    sp.add_argument("--restart", action="store_true", help="先停掉正在跑的看板，再启动（App 默认带这个）")
     sp.add_argument("--cookie", default="")
     sp.set_defaults(func=cmd_serve)
 
@@ -508,7 +509,7 @@ def cmd_install(ctx: Ctx) -> int:
     if result.app_path:
         ctx.say(f"✓ 已生成 App：{result.app_path}")
         ctx.say("   双击它，或者拖进 Dock 点一下，就会启动看板并打开浏览器。")
-        ctx.say("   看板已经在运行时再点一次，只会打开页面，不会重复启动。")
+        ctx.say("   每次打开都会先停掉旧服务再起新的，保证跑的是最新代码。")
     if result.cli_path:
         if result.app_path:
             ctx.say("")
@@ -596,6 +597,7 @@ def cmd_serve(ctx: Ctx) -> int:
         port=ctx.args.port,
         cookie=ctx.cookie,
         open_browser=not ctx.args.no_open,
+        restart=ctx.args.restart,
     )
 
 

@@ -358,7 +358,8 @@ export BILI_COOKIE='SESSDATA=...'
 
 几个细节：
 
-- **看板已经在跑时，再点一次只会打开页面**，不会启动第二个服务（靠端口上的 `/api/health` 识别）。
+- **每次打开 App 都会重启服务**：先停掉正在跑的那个（靠 PID 文件 + 端口归属识别，不会误杀别的进程），
+  再启动新的。所以改完代码，重新点一下 App 就是最新版本，不用手动去找进程。
 - App 里写死了 Python 的**绝对路径**：从 Finder 启动的进程只有极简 `PATH`，找不到 conda/homebrew 里的 `python3`。
 - 启动失败会弹窗提示，日志在 `~/.bilifans/app.log`，不会「闪一下就没了」。
 - 只装一样：`--no-app` 或 `--no-cli`；换位置：`--app-dir ~/Desktop`。
@@ -399,7 +400,7 @@ meta(k, v)                                            -- 杂项
 
 ```bash
 bilifans login                         # 打开浏览器扫码，自动取回 Cookie 并登记账号
-bilifans serve [--port 8787]           # 打开网页看板（图形界面）
+bilifans serve [--port 8787] [--restart]  # 打开网页看板；--restart 先停旧服务再起新的
 bilifans install                       # 生成可双击的 App + 全局命令
 bilifans whoami                        # 检查 Cookie 有效性、确认登录的是哪个号
 bilifans doctor                        # 逐项体检：Cookie / 公开接口 / 登录态 / 创作中心 / 粉丝列表
