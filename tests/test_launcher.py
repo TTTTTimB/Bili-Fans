@@ -26,3 +26,40 @@ def test_launcher_survives_symlink(tmp_path):
     result = run(link)
     assert result.returncode == 0, result.stderr
     assert "bilifans" in result.stdout
+
+
+def _launcher_env(tmp_path, broken_python3=True):
+    """构造一个 PATH，头里放一个「存在但跑不了」的 python3。"""
+    import os
+
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir(exist_ok=True)
+    if broken_python3:
+        stub = fake_bin / "python3"
+        stub.write_text("#!/bin/sh\nexit 1\n")
+        stub.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env.pop("PYTHON", None)
+    return env
+
+
+def test_launcher_skips_unusable_python3(tmp_path):
+    """系统 python3 是 3.9（没有 tomllib）时，要自动换一个能用的解释器。"""
+    result = subprocess.run(
+        [str(LAUNCHER), "--version"], capture_output=True, text=True,
+        timeout=60, env=_launcher_env(tmp_path),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "bilifans" in result.stdout
+
+
+def test_launcher_explains_when_no_usable_python(tmp_path):
+    """一个能用的都没有时，给一句人话，而不是抛 traceback。"""
+    result = subprocess.run(
+        [str(LAUNCHER), "--version"], capture_output=True, text=True,
+        timeout=60, env=_launcher_env(tmp_path, broken_python3=True) | {"PATH": str(tmp_path / "fakebin")},
+    )
+    assert result.returncode == 1
+    assert "3.11" in result.stderr
+    assert "Traceback" not in result.stderr

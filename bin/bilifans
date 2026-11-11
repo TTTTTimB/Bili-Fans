@@ -12,5 +12,18 @@ while [ -L "$SELF" ]; do
     esac
 done
 DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+export PYTHONPATH="$DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
-PYTHONPATH="$DIR/src${PYTHONPATH:+:$PYTHONPATH}" exec "${PYTHON:-python3}" -m bili_fans "$@"
+# 找一个跑得动的解释器。系统自带的 python3 可能是 3.9，
+# 而本程序要 3.11+（tomllib），直接用它只会在 import 时炸掉。
+for cand in ${PYTHON:-} python3 python3.13 python3.12 python3.11 python; do
+    [ -n "$cand" ] || continue
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import tomllib' >/dev/null 2>&1; then
+        exec "$cand" -m bili_fans "$@"
+    fi
+done
+
+echo "没找到 Python 3.11 及以上版本（本程序依赖标准库 tomllib）。" >&2
+echo "当前 PATH 里的 python3: $(command -v python3 || echo 无)" >&2
+echo "可以这样指定解释器：PYTHON=/path/to/python3.12 $0" >&2
+exit 1
