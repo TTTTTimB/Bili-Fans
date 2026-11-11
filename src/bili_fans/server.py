@@ -33,12 +33,9 @@ from .db import (
     snapshot_count,
     upsert_account,
 )
-from . import login as qrlogin
 from .fans import crawl as crawl_fans
 from .fans import summarize_churn, survival_days
 from .http import HttpError, Transport
-from .qr import encode as qr_encode
-from .qr import to_svg as qr_svg
 from .report import bar_chart_svg, line_chart_svg
 from .service import backfill_account, collect, ensure_account, poll_account, resolve_cookie
 from .timeutil import day_start_ts, get_tz, local_day, now_ts, to_local
@@ -125,59 +122,6 @@ class JobRunner:
             return self._jobs.get(job_id)
 
 
-class LoginStore:
-    """扫码登录的会话：内存里存一会儿，10 分钟没动静就清掉。"""
-
-    def __init__(self, ttl: float = 600.0, done_ttl: float = 120.0) -> None:
-        self._items: dict[str, tuple[object, float]] = {}
-        # 已经登录成功的会话：B 站的码只能用一次，但前端可能并发/重试，
-        # 所以把结果缓存下来，重复轮询直接返回成功，别让「一次成功、一次失效」打架
-        self._done: dict[str, tuple[dict, float]] = {}
-        self._lock = threading.Lock()
-        self._seq = 0
-        self._ttl = ttl
-        self._done_ttl = done_ttl
-
-    def add(self, session) -> str:
-        with self._lock:
-            self._seq += 1
-            sid = f"qr{int(time.time())}-{self._seq}"
-            self._prune()
-            self._items[sid] = (session, time.time())
-            return sid
-
-    def get(self, sid: str):
-        with self._lock:
-            item = self._items.get(sid)
-            if not item:
-                return None
-            session, created = item
-            return session if time.time() - created < self._ttl else None
-
-    def drop(self, sid: str) -> None:
-        with self._lock:
-            self._items.pop(sid, None)
-
-    def complete(self, sid: str, payload: dict) -> None:
-        with self._lock:
-            self._done[sid] = (payload, time.time())
-
-    def get_done(self, sid: str) -> dict | None:
-        with self._lock:
-            item = self._done.get(sid)
-            if not item:
-                return None
-            payload, created = item
-            return payload if time.time() - created < self._done_ttl else None
-
-    def _prune(self) -> None:
-        now = time.time()
-        for sid in [k for k, (_, t) in self._items.items() if now - t > self._ttl]:
-            self._items.pop(sid, None)
-        for sid in [k for k, (_, t) in self._done.items() if now - t > self._done_ttl]:
-            self._done.pop(sid, None)
-
-
 # ---------------------------------------------------------------- 数据组装
 
 
@@ -187,10 +131,10 @@ def _fmt_ts(ts: int | None, tz) -> str:
     return to_local(ts, tz).strftime("%m-%d %H:%M")
 
 
-def build_overview(conn, uid: int | None, days: int, cfg: Config, tz, cookie: str) -> dict[str, Any]:
+def build_overview(conn, days: int, cfg: Config, tz, cookie: str) -> dict[str, Any]:
+    """看板只认一个账号：Cookie 属于谁就是谁，没有「切换」。"""
     accounts = list_accounts(conn)
     payload: dict[str, Any] = {
-        "accounts": [{"uid": a.uid, "name": a.name or "未命名", "label": a.label} for a in accounts],
         "days": days,
         "cookie_ok": bool(cookie),
         "tz": cfg.timezone,
@@ -199,9 +143,7 @@ def build_overview(conn, uid: int | None, days: int, cfg: Config, tz, cookie: st
         payload["empty"] = "no_account"
         return payload
 
-    if uid is None or all(a.uid != uid for a in accounts):
-        uid = accounts[0].uid
-    acc = next(a for a in accounts if a.uid == uid)
+    acc = accounts[0]
 
     rows, summary = collect(conn, acc.uid, days, tz)
     last = last_snapshot(conn, acc.uid)
@@ -323,7 +265,6 @@ class AppHandler(BaseHTTPRequestHandler):
     cookie_override: str = ""     # serve --cookie 传进来的话就固定用它
     tz = None
     jobs: JobRunner
-    logins: LoginStore
     server_version = "bilifans"
 
     # 关掉逐条请求日志，控制台只留关键信息
@@ -405,7 +346,7 @@ class AppHandler(BaseHTTPRequestHandler):
             days = max(1, min(365, int(q.get("days") or 30)))
             conn = self._db()
             try:
-                payload = build_overview(conn, self._uid(q.get("uid")), days, self.cfg, self.tz, self._cookie())
+                payload = build_overview(conn, days, self.cfg, self.tz, self._cookie())
             finally:
                 conn.close()
             self._json(payload)
@@ -468,10 +409,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._json(job.as_dict())
             return
 
-        if path == "/api/login/qr":
-            self._login_poll(self._query().get("id", ""))
-            return
-
         if path == "/api/health":
             self._json({
                 "app": "bilifans",
@@ -504,36 +441,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
 
-        if path == "/api/login/qr":
-            self._login_start()
-            return
-
-        if path == "/api/account":
-            body = self._body()
-            try:
-                uid = int(body.get("uid"))
-            except (TypeError, ValueError):
-                self._json({"error": "UID 必须是数字"}, 400)
-                return
-            if uid <= 0:
-                self._json({"error": "UID 不合法"}, 400)
-                return
-            conn = self._db()
-            try:
-                client = self._client()
-                name = str(body.get("name") or "").strip()
-                if not name:
-                    try:
-                        profile = client.profile(uid)
-                        name = profile.name if profile else ""
-                    except (ApiError, HttpError):
-                        name = ""
-                acc = upsert_account(conn, uid, name, "")
-            finally:
-                conn.close()
-            self._json({"ok": True, "uid": acc.uid, "label": acc.label})
-            return
-
         if path == "/api/run":
             body = self._body()
             action = str(body.get("action") or "")
@@ -555,60 +462,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return accounts
         return [acc for acc in accounts if acc.uid == uid] or [ensure_account(conn, uid)]
 
-    def _login_start(self) -> None:
-        """生成一张二维码。不需要登录态。"""
-        client = self._client()
-        try:
-            session = qrlogin.begin(client)
-        except (ApiError, HttpError) as exc:
-            self._json({"error": str(exc)}, 502)
-            return
-        sid = self.logins.add(session)
-        self._json({
-            "id": sid,
-            "svg": qr_svg(qr_encode(session.url), scale=6),
-            "ttl": QR_TTL,
-            "cookie_ok": bool(self._cookie()),
-        })
-
-    def _login_poll(self, sid: str) -> None:
-        cached = self.logins.get_done(sid)
-        if cached is not None:
-            self._json(cached)
-            return
-
-        session = self.logins.get(sid)
-        if session is None:
-            self._json({"status": "expired", "error": "二维码已失效，请刷新"}, 404)
-            return
-        client = session.client or self._client()
-        try:
-            state = qrlogin.check(client, session)
-        except (ApiError, HttpError) as exc:
-            self._json({"status": "waiting", "error": str(exc), "age": round(session.age(), 1)})
-            return
-
-        payload: dict[str, object] = {
-            "status": state.status,
-            "uid": state.values.get("DedeUserID", ""),
-            "age": round(session.age(), 1),
-            "ttl": QR_TTL,
-            "cookie_ok": bool(self._cookie()),
-        }
-        if state.status == "confirmed":
-            from . import browser
-
-            cookie, _values = qrlogin.finalize(client, state)
-            try:
-                path = browser.save_cookie(browser.COOKIE_FILE, cookie)
-                payload["saved"] = str(path)
-            except OSError as exc:
-                payload["error"] = f"Cookie 保存失败：{exc}"
-            payload["cookie_ok"] = True
-            self.logins.complete(sid, payload)
-            self.logins.drop(sid)
-        self._json(payload)
-
     def _login_task(self, log: Callable[[str], None]) -> None:
         """在页面里点「登录」，等于在终端跑 bilifans login。"""
         from . import browser
@@ -619,8 +472,11 @@ class AppHandler(BaseHTTPRequestHandler):
         def on_wait(left: float) -> None:
             log(f"  等待扫码…还剩 {int(left)} 秒")
 
+        def on_progress(text: str) -> None:
+            log(f"  {text}")
+
         try:
-            result = browser.capture_cookie(timeout=180, on_wait=on_wait)
+            result = browser.capture_cookie(timeout=180, on_wait=on_wait, on_progress=on_progress)
         except browser.BrowserError as exc:
             log(f"✗ {exc}")
             log("  也可以按 docs/get-cookie.md 手动复制 Cookie")
@@ -629,7 +485,21 @@ class AppHandler(BaseHTTPRequestHandler):
         path = browser.save_cookie(browser.COOKIE_FILE, result.cookie)
         log(f"✓ 已保存到 {path}（权限 600）")
         log(f"  {result.masked}")
-        log("  回到页面会自动显示「Cookie 已配置」，接下来可以回填数据、抓粉丝名单了")
+
+        # 登录了哪个号，就直接把它作为唯一账号登记进来
+        conn = self._db()
+        try:
+            cookie = self._cookie()
+            try:
+                mid, uname = BiliClient(Transport(cookie=cookie), cookie=cookie).me()
+            except (ApiError, HttpError):
+                mid, uname = 0, ""
+            if mid:
+                acc = upsert_account(conn, mid, uname, "")
+                log(f"✓ 已登记账号：{acc.label}")
+        finally:
+            conn.close()
+        log("  回到页面会自动刷新，接下来可以回填数据、抓粉丝名单了")
 
     def _make_task(self, action: str, uid: int | None) -> Callable[[Callable[[str], None]], None]:
         def task(log: Callable[[str], None]) -> None:
@@ -770,37 +640,15 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 .linkbtn{border:0;background:none;color:var(--accent);padding:0 4px;font-size:12.5px;
   text-decoration:underline;cursor:pointer}
 .linkbtn:hover{color:#1d4ed8}
-.modal{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;
-  align-items:center;justify-content:center;z-index:50;backdrop-filter:blur(2px)}
-.modal.show{display:flex}
-.modal-card{background:#fff;border-radius:16px;padding:22px 24px 20px;width:min(400px,92vw);
-  text-align:center;box-shadow:0 24px 60px rgba(15,23,42,.28)}
-.modal-card h3{margin:0 0 2px;font-size:16px}
-.modal-card .sub2{color:var(--muted);font-size:12px;margin:0 0 12px}
-.qrbox{width:236px;height:236px;margin:0 auto;border:1px solid var(--line);border-radius:10px;
-  padding:8px;background:#fff;position:relative}
-.qrbox.expired svg{opacity:.12}
-.qrbox .overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
-  color:var(--muted);font-size:13px;letter-spacing:.05em}
-.qrbox.expired .overlay{display:flex}
-.qrbox svg{width:100%;height:100%;display:block}
-.qr-status{color:var(--muted);font-size:12.5px;min-height:20px;margin:10px 0 14px}
-.qr-actions{display:flex;gap:8px;justify-content:center;align-items:center;flex-wrap:wrap}
-tr.gone-row td{color:#94a3b8}
-.skeleton{height:260px;border-radius:10px;background:linear-gradient(90deg,#f1f5f9,#f8fafc,#f1f5f9);
-  background-size:200% 100%;animation:sk 1.2s infinite}
-@keyframes sk{0%{background-position:0 0}100%{background-position:-200% 0}}
 </style></head>
 <body><div class="wrap">
 <header>
   <h1>粉丝变化看板</h1>
   <div class="grow"></div>
-  <select id="account" title="切换账号"></select>
   <div class="seg" id="range">
     <button data-days="7">7 天</button>
     <button data-days="30" class="on">30 天</button>
   </div>
-  <button id="add" title="添加要监控的 B 站账号">+ 账号</button>
   <button id="refresh" title="重新读取本地数据">刷新</button>
 </header>
 <div class="sub" id="status"></div>
@@ -808,23 +656,9 @@ tr.gone-row td{color:#94a3b8}
 <div id="app"><div class="skeleton"></div></div>
 </div>
 
-<div class="modal" id="qrModal">
-  <div class="modal-card">
-    <h3>扫码登录 B 站</h3>
-    <p class="sub2" id="qrHint">手机 B 站 App 扫一扫 · 3 分钟有效，过期自动换新</p>
-    <div class="qrbox" id="qrBox"></div>
-    <p class="qr-status" id="qrStatus">正在获取二维码…</p>
-    <div class="qr-actions">
-      <button id="qrRefresh">刷新二维码</button>
-      <button id="qrClose" class="primary">关闭</button>
-    </div>
-    <p style="margin:12px 0 0"><button class="linkbtn" id="qrFallback">扫不动？改用浏览器窗口登录</button></p>
-  </div>
-</div>
-
 <script>
 const $ = (s) => document.querySelector(s);
-const state = {uid: null, days: 30, loading: false, job: null, cookieOk: false,
+const state = {days: 30, loading: false, job: null, cookieOk: false,
                fan: {q: "", status: "all", page: 1}};
 
 const nf = (n) => (n === null || n === undefined) ? "—" : n.toLocaleString("zh-CN");
@@ -847,6 +681,7 @@ function el(tag, cls, text) {
 function renderStatus(d) {
   const box = $("#status");
   box.textContent = "";
+  if (d.label) box.appendChild(el("span", "", d.label));
   const cookie = el("span");
   cookie.appendChild(el("i", "dot" + (d.cookie_ok ? "" : " bad")));
   cookie.appendChild(document.createTextNode(d.cookie_ok ? "Cookie 已配置" : "未配置 Cookie"));
@@ -868,32 +703,23 @@ function renderStatus(d) {
   box.appendChild(el("span", "", "时区 " + d.tz));
 }
 
-function renderEmpty(d) {
+function renderEmpty() {
   const box = $("#app");
   box.textContent = "";
   const sec = el("section");
   const wrap = el("div", "empty");
-  wrap.appendChild(el("div", "", "还没有添加账号"));
-  const p = el("div", "", "输入一个 B 站 UID，开始记录它的粉丝变化");
+  wrap.appendChild(el("div", "", "还没有账号"));
+  const p = el("div", "", "登录一次 B 站，程序会自动记住这个号并开始记录");
   p.style.margin = "8px 0 16px";
   wrap.appendChild(p);
-  const input = el("input");
-  input.placeholder = "例如 123456789";
-  input.id = "uidInput";
-  const btn = el("button", "primary", "添加");
-  btn.style.marginLeft = "8px";
-  btn.onclick = async () => {
-    const uid = (input.value || "").trim();
-    if (!/^\d+$/.test(uid)) { alert("UID 只能是数字"); return; }
-    btn.disabled = true; btn.textContent = "添加中…";
-    try {
-      await api("/api/account", {method: "POST", headers: {"Content-Type": "application/json"},
-                                 body: JSON.stringify({uid: Number(uid)})});
-      await load();
-    } catch (e) { alert("添加失败：" + e.message); btn.disabled = false; btn.textContent = "添加"; }
-  };
-  wrap.appendChild(input); wrap.appendChild(btn);
+  const btn = el("button", "primary", "登录 B 站");
+  btn.id = "loginBtn";
+  btn.onclick = () => runJob("login");
+  wrap.appendChild(btn);
   sec.appendChild(wrap);
+  const log = el("div", "log");
+  log.id = "log";
+  sec.appendChild(log);
   box.appendChild(sec);
 }
 
@@ -961,7 +787,7 @@ function renderWarmup(d) {
   const ul = el("ul", "steps");
   const items = [
     "让定时任务继续跑（每 5 分钟一次），明天这时候就有完整的每日净增了。",
-    "想立刻看到精确的「新增 / 掉粉」：先点「登录 B 站（扫码）」，再点「回填近 30 天官方数据」，一次拿回 30 天。",
+    "想立刻看到精确的「新增 / 掉粉」：先点「登录 B 站」，再点「回填近 30 天官方数据」，一次拿回 30 天。",
     "想看「谁取关了我」：点「抓粉丝名单」，明天再抓一次就能比对出名单。",
   ];
   for (const text of items) ul.appendChild(el("li", "", text));
@@ -1015,9 +841,9 @@ function renderActions(d) {
     return b;
   };
   const needLogin = !d.cookie_ok;
-  const login = el("button", needLogin ? "primary" : "", needLogin ? "登录 B 站（扫码）" : "重新登录");
+  const login = el("button", needLogin ? "primary" : "", needLogin ? "登录 B 站" : "重新登录");
   login.id = "loginBtn";
-  login.onclick = openLogin;
+  login.onclick = () => runJob("login");
   box.appendChild(login);
   box.appendChild(mk("采一次快照", "poll", !needLogin));
 
@@ -1033,7 +859,7 @@ function renderActions(d) {
   sec.appendChild(box);
   if (needLogin) {
     sec.appendChild(el("p", "note",
-      "还没有登录：点「登录 B 站（扫码）」，二维码会直接出现在弹窗里，手机扫一下就完成。"));
+      "还没有登录：点「登录 B 站」会弹出一个浏览器窗口，扫码一次即可，之后不用再扫。"));
   }
 
   if (d.meta && d.meta.crawls && d.meta.crawls.length) {
@@ -1057,30 +883,10 @@ function renderActions(d) {
 
 function render(d) {
   $("#status") && renderStatus(d);
-  if (d.empty === "no_account") { renderEmpty(d); return; }
-
-  const sel = $("#account");
-  const keep = sel.value;
-  sel.textContent = "";
-  for (const a of d.accounts) {
-    const opt = el("option", "", a.label);
-    opt.value = a.uid;
-    sel.appendChild(opt);
-  }
-  sel.value = keep && [...sel.options].some((o) => o.value === keep) ? keep : String(d.uid);
-  state.uid = Number(sel.value);
+  if (d.empty === "no_account") { renderEmpty(); return; }
 
   const app = $("#app");
   app.textContent = "";
-
-  if (!d.has_data) {
-    const sec = el("section");
-    sec.appendChild(el("h2", "", d.label));
-    sec.appendChild(el("p", "hint", "这个号还没有任何数据。先点下面的「采一次快照」或「回填近 30 天官方数据」。"));
-    app.appendChild(sec);
-    app.appendChild(renderActions(d));
-    return;
-  }
 
   if (d.meta && d.meta.stale) {
     const warn = el("section");
@@ -1134,7 +940,7 @@ function renderFansShell() {
   sec.appendChild(el("p", "hint",
     "核对用：这就是本地存下来的完整名单。数量和 B 站粉丝数对得上，说明抓取成功；搜个昵称、翻两页也能确认。"));
   if (!state.cookieOk) {
-    sec.appendChild(el("p", "note", "未配置 Cookie，抓不了名单。点上面的「登录 B 站（扫码）」，登录完刷新即可。"));
+    sec.appendChild(el("p", "note", "未配置 Cookie，抓不了名单。点上面的「登录 B 站」，登录完刷新即可。"));
   }
 
   const bar = el("div", "toolbar");
@@ -1183,7 +989,6 @@ async function loadFans() {
   const holder = $("#fanTable");
   if (!holder) return;
   const q = new URLSearchParams({status: state.fan.status, page: state.fan.page, size: 50});
-  if (state.uid) q.set("uid", state.uid);
   if (state.fan.q) q.set("q", state.fan.q);
 
   let d;
@@ -1236,154 +1041,13 @@ async function loadFans() {
   pager.appendChild(next);
 }
 
-let qrTimer = null;
-let qrTick = null;
-let qrId = null;
-let qrDeadline = 0;
-let qrState = "";
-let qrRetries = 0;
-let qrPolling = false;       // 防止两个请求同时在飞（B 站的码只认一次）
-let qrSawScanned = false;    // 已经扫过码：此时失效多半是「确认了但没接住」
-
-function openLogin() {
-  qrRetries = 0;
-  qrSawScanned = false;
-  $("#qrModal").classList.add("show");
-  refreshQr();
-}
-
-function closeLogin() {
-  clearInterval(qrTimer);
-  clearInterval(qrTick);
-  qrTimer = qrTick = null;
-  qrId = null;
-  qrDeadline = 0;
-  qrState = "";
-  qrPolling = false;
-  qrSawScanned = false;
-  $("#qrModal").classList.remove("show");
-}
-
-function setQrStatus(text, state) {
-  if (state) qrState = state;
-  $("#qrStatus").textContent = text;
-}
-
-function startCountdown() {
-  clearInterval(qrTick);
-  qrTick = setInterval(() => {
-    if (qrState !== "waiting") return;
-    const left = Math.max(0, Math.round((qrDeadline - Date.now()) / 1000));
-    if (left > 0) setQrStatus(`等待扫码…（${left} 秒后失效）`, "waiting");
-  }, 1000);
-}
-
-async function refreshQr() {
-  clearInterval(qrTimer);
-  clearInterval(qrTick);
-  qrId = null;
-  qrPolling = false;
-  qrState = "loading";
-  $("#qrBox").classList.remove("expired");
-  $("#qrBox").textContent = "";
-  $("#qrStatus").textContent = "正在获取二维码…";
-  try {
-    const d = await api("/api/login/qr", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
-    });
-    qrId = d.id;
-    qrDeadline = Date.now() + (d.ttl || 180) * 1000;
-    $("#qrHint").textContent = d.cookie_ok
-      ? "当前已经是登录状态；扫码会切换成手机上的那个号"
-      : "手机 B 站 App 扫一扫 · 3 分钟有效，过期自动换新";
-    $("#qrBox").innerHTML = d.svg + '<div class="overlay">已失效</div>';
-    setQrStatus("等待扫码…", "waiting");
-    startCountdown();
-    qrTimer = setInterval(pollQr, 2000);
-  } catch (e) {
-    setQrStatus("获取二维码失败：" + e.message, "error");
-  }
-}
-
-async function pollQr() {
-  if (!qrId || qrPolling || qrState === "done") return;
-  qrPolling = true;
-  let d;
-  try {
-    d = await api("/api/login/qr?id=" + encodeURIComponent(qrId));
-  } catch (e) {
-    qrPolling = false;
-    clearInterval(qrTimer);
-    clearInterval(qrTick);
-    $("#qrBox").classList.add("expired");
-    if (qrRetries++ < 3) { setQrStatus("会话断了，正在换一张二维码…", "expired"); setTimeout(refreshQr, 600); }
-    else setQrStatus("连不上登录接口，点「刷新二维码」重试", "error");
-    return;
-  }
-
-  qrPolling = false;
-
-  if (d.status === "scanned") {
-    qrSawScanned = true;
-    setQrStatus("已扫码，请在手机上点「确认登录」", "scanned");
-    return;
-  }
-  if (d.status === "confirmed") {
-    clearInterval(qrTimer);
-    clearInterval(qrTick);
-    setQrStatus("✓ 登录成功，正在刷新页面…", "done");
-    qrState = "done";
-    setTimeout(async () => { closeLogin(); await load(); }, 700);
-    return;
-  }
-  if (d.status === "expired") {
-    clearInterval(qrTimer);
-    clearInterval(qrTick);
-    $("#qrBox").classList.add("expired");
-    const age = Math.round(d.age || 0);
-
-    // 已经登录成功了：这时候再纠结这张码过没过期没有意义，直接收工
-    if (d.cookie_ok) {
-      setQrStatus("✓ 已登录，正在刷新…", "done");
-      qrState = "done";
-      setTimeout(async () => { closeLogin(); await load(); }, 500);
-      return;
-    }
-
-    // 扫过码之后失效：八成是手机上已经确认、但那一拍没接住。
-    // 这时别急着换码（换了你就得再扫一次、又登录一次），先再核对一次。
-    if (qrSawScanned && qrRetries++ < 2) {
-      setQrStatus("已确认，正在核对登录状态…", "expired");
-      setTimeout(() => { qrPolling = false; pollQr(); }, 400);
-      return;
-    }
-    if (!qrSawScanned && qrRetries++ < 3) {
-      setQrStatus(`二维码失效了（存在了 ${age} 秒），正在自动换一张…`, "expired");
-      setTimeout(refreshQr, 800);
-      return;
-    }
-    setQrStatus("没拿到登录态。点「刷新二维码」重试，或改用浏览器窗口登录", "error");
-  }
-}
-
-$("#qrClose").onclick = closeLogin;
-$("#qrRefresh").onclick = () => { qrRetries = 0; refreshQr(); };
-$("#qrFallback").onclick = () => {
-  closeLogin();
-  const target = document.getElementById("loginBtn");
-  if (target) { target.scrollIntoView({behavior: "smooth", block: "center"}); }
-  runJob("login");
-};
-$("#qrModal").onclick = (e) => { if (e.target.id === "qrModal") closeLogin(); };
-
 async function load() {
   if (state.loading) return;
   state.loading = true;
   $("#refresh").disabled = true;
   try {
     const q = new URLSearchParams({days: state.days});
-    if (state.uid) q.set("uid", state.uid);
-    const d = await api("/api/overview?" + q.toString());
+      const d = await api("/api/overview?" + q.toString());
     render(d);
   } catch (e) {
     $("#app").textContent = "";
@@ -1405,7 +1069,7 @@ async function runJob(action) {
   try {
     const r = await api("/api/run", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action, uid: state.uid}),
+      body: JSON.stringify({action}),
     });
     await follow(r.job);
   } catch (e) {
@@ -1434,22 +1098,7 @@ function follow(id) {
 }
 
 $("#refresh").onclick = load;
-$("#add").onclick = async () => {
-  const raw = (prompt("输入要添加的 B 站 UID（纯数字）") || "").trim();
-  if (!raw) return;
-  if (!/^\d+$/.test(raw)) { alert("UID 只能是数字"); return; }
-  try {
-    const r = await api("/api/account", {method: "POST", headers: {"Content-Type": "application/json"},
-                                         body: JSON.stringify({uid: Number(raw)})});
-    state.uid = r.uid;
-    await load();
-  } catch (e) { alert("添加失败：" + e.message); }
-};
-$("#account").onchange = (e) => {
-  state.uid = Number(e.target.value);
-  state.fan = {q: "", status: "all", page: 1};
-  load();
-};
+$("#refresh").onclick = load;
 $("#range").onclick = (e) => {
   const btn = e.target.closest("button[data-days]");
   if (!btn) return;
@@ -1458,7 +1107,7 @@ $("#range").onclick = (e) => {
   load();
 };
 load();
-if (location.hash === "#login") setTimeout(openLogin, 400);   // 可以直接用 #login 深链
+if (location.hash === "#login") setTimeout(() => runJob("login"), 400);   // #login 深链
 </script>
 </body></html>
 """
@@ -1505,7 +1154,6 @@ def make_server(cfg: Config, *, host: str = "127.0.0.1", port: int = DEFAULT_POR
             "cookie_override": cookie,
             "tz": get_tz(cfg.timezone),
             "jobs": JobRunner(),
-            "logins": LoginStore(),
         },
     )
     for candidate in range(port, port + 12):

@@ -31,9 +31,6 @@ STAT_URL = f"{API_BASE}/x/relation/stat"
 FOLLOWERS_URL = f"{API_BASE}/x/relation/followers"
 CARD_URL = f"{API_BASE}/x/web-interface/card"
 CREATOR_STAT_URL = f"{MEMBER_BASE}/x/web/index/stat"
-PASSPORT_BASE = "https://passport.bilibili.com"
-QR_GENERATE_URL = f"{PASSPORT_BASE}/x/passport-login/web/qrcode/generate"
-QR_POLL_URL = f"{PASSPORT_BASE}/x/passport-login/web/qrcode/poll"
 
 # 粉丝列表超过可翻页上限时 B 站返回的 code
 CODE_TOO_MANY_PAGES = 22007
@@ -100,21 +97,6 @@ class FanPage:
     total: int | None = None
     page: int = 1
     capped: bool = False    # 撞上 B 站的可查看上限
-
-
-@dataclass
-class QRSession:
-    """扫码登录的一张二维码。url 是二维码内容，key 用来轮询状态。"""
-
-    key: str
-    url: str
-
-
-@dataclass
-class QRLoginState:
-    status: str = "waiting"          # waiting / scanned / confirmed / expired
-    cookie: str = ""
-    values: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -206,40 +188,6 @@ class BiliClient:
             page=pn,
         )
 
-    # ---------- 扫码登录 ----------
-
-    def qr_generate(self) -> QRSession:
-        payload = self._get(QR_GENERATE_URL, None, "https://www.bilibili.com/")
-        data = payload.get("data") or {}
-        url, key = str(data.get("url") or ""), str(data.get("qrcode_key") or "")
-        if not url or not key:
-            raise ApiError(-1, "接口没返回二维码内容", url=QR_GENERATE_URL)
-        return QRSession(key=key, url=url)
-
-    def fingerprint(self) -> tuple[str, str]:
-        """拿一对 buvid，补进 Cookie 里可以明显降低 -352 的概率。"""
-        payload = self._get(f"{API_BASE}/x/frontend/finger/spi", None, "https://www.bilibili.com/")
-        data = payload.get("data") or {}
-        return str(data.get("b_3") or ""), str(data.get("b_4") or "")
-
-    def qr_poll(self, key: str) -> QRLoginState:
-        payload = self._get(QR_POLL_URL, {"qrcode_key": key}, "https://www.bilibili.com/")
-        data = payload.get("data") or {}
-        code = _as_int(data.get("code"))
-        if code == 86101:
-            return QRLoginState(status="waiting")
-        if code == 86090:
-            return QRLoginState(status="scanned")
-        if code == 86038:
-            return QRLoginState(status="expired")
-        if code != 0:
-            return QRLoginState(status="expired")
-
-        values = _cookie_values(str(data.get("url") or ""))
-        if not values.get("SESSDATA"):
-            raise ApiError(-1, "登录成功但没拿到 SESSDATA", url=QR_POLL_URL)
-        return QRLoginState(status="confirmed", values=values, cookie=build_cookie(values))
-
     # ---------- 创作中心 ----------
 
     def me(self) -> tuple[int, str]:
@@ -297,23 +245,6 @@ class BiliClient:
             total_fans=total,
             incr_fans=_as_int(data.get("incr_fans")),
         )
-
-
-WANTED_COOKIES = ("SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "buvid3", "buvid4")
-
-
-def _cookie_values(url: str) -> dict[str, str]:
-    """登录成功后 B 站把凭据拼在跳转链接的 query 里。"""
-    from urllib.parse import parse_qs, urlparse
-
-    query = parse_qs(urlparse(url).query)
-    return {k: v[0] for k, v in query.items() if k in WANTED_COOKIES and v}
-
-
-def build_cookie(values: dict[str, str]) -> str:
-    """关键字段排前面，其余原样带上去（别把 buvid 之类漏掉）。"""
-    ordered = [k for k in WANTED_COOKIES if k in values] + [k for k in values if k not in WANTED_COOKIES]
-    return "; ".join(f"{k}={values[k]}" for k in ordered)
 
 
 def _parse_fan(item: dict[str, Any]) -> Fan:

@@ -29,7 +29,7 @@ APP_DIR = Path.home() / ".bilifans"
 PROFILE_DIR = APP_DIR / "chrome-profile"
 COOKIE_FILE = Path.home() / ".bilifans_cookie"
 BILI_DOMAIN = "bilibili.com"
-DEFAULT_URL = "https://www.bilibili.com/"
+DEFAULT_URL = "https://passport.bilibili.com/login"
 
 # 这些字段拿不到也不影响用，但一起存着更稳（少触发风控）
 WANTED = ("SESSDATA", "bili_jct", "buvid3", "buvid4", "DedeUserID")
@@ -105,7 +105,19 @@ class ChromeCDP:
             "--remote-debugging-pipe",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-features=Translate",
+            # 下面这些是「窗口开了但页面一直转圈」的常见元凶：
+            # 首次启动时的后台任务、扩展加载、组件更新、钥匙串弹窗
+            "--no-service-autorun",
+            "--disable-sync",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-client-side-phishing-detection",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--disable-features=Translate,MediaRouter,OptimizationHints,InterestFeedContentSuggestions",
+            "--no-proxy-server",
             self.url,
         ]
         if self.headless:
@@ -229,6 +241,26 @@ class ChromeCDP:
         except (BrowserError, TimeoutError):
             pass
 
+    def wait_ready(self, timeout: float = 25.0) -> bool:
+        """等页面 load 完。返回 False 表示超时（不报错，接着读 Cookie 也行）。"""
+        session = self._session or self.attach_page()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                result = self.call(
+                    "Runtime.evaluate",
+                    {"expression": "document.readyState", "returnByValue": True},
+                    session=session,
+                    timeout=5,
+                )
+                state = (result.get("result") or {}).get("value")
+            except (BrowserError, TimeoutError):
+                return False
+            if state == "complete":
+                return True
+            time.sleep(0.3)
+        return False
+
     def cookies(self) -> list[dict]:
         session = self._session or self.attach_page()
         result = self.call("Network.getAllCookies", session=session)
@@ -306,6 +338,7 @@ def capture_cookie(
     chrome: str | None = None,
     client_factory: Callable[..., Any] = ChromeCDP,
     on_wait: Callable[[float], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> CookieResult:
     """打开 bilibili.com，等到 SESSDATA 出现就把它取回来。
 
@@ -320,10 +353,19 @@ def capture_cookie(
             "  也可以按 docs/get-cookie.md 手动复制 Cookie。"
         )
 
+    def progress(text: str) -> None:
+        if on_progress:
+            on_progress(text)
+
     started = time.time()
     with client_factory(browser, Path(profile_dir), url=url, headless=headless, timeout=30) as cdp:
+        progress("浏览器已启动，正在打开登录页…")
         cdp.attach_page()
         cdp.navigate(url)  # 失败也无所谓，cookie 照样能读
+        if cdp.wait_ready(timeout=20):
+            progress("登录页加载完成，等待扫码…")
+        else:
+            progress("登录页加载较慢，已经开始等扫码…")
         deadline = started + timeout
         while True:
             try:

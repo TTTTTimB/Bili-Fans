@@ -84,6 +84,9 @@ class FakeCDP:
     def navigate(self, url):
         self.url = url
 
+    def wait_ready(self, timeout=25.0):
+        return True
+
     def cookies(self):
         self.polls += 1
         base = [{"name": "buvid3", "value": "b3", "domain": ".bilibili.com"}]
@@ -106,7 +109,8 @@ def test_capture_waits_until_login_appears():
     assert result.values["buvid3"] == "b3"
     assert FakeCDP.instances[0].polls == 3
     assert FakeCDP.instances[0].closed is True       # 用完要关掉浏览器
-    assert FakeCDP.instances[0].url.endswith("bilibili.com/")
+    assert FakeCDP.instances[0].url == br.DEFAULT_URL
+    assert "passport.bilibili.com" in FakeCDP.instances[0].url
 
 
 class NeverLogin(FakeCDP):

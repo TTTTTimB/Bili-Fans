@@ -64,25 +64,13 @@ python3 -V            # 确认 >= 3.11
 ./bin/bilifans login
 ```
 
-终端里直接打印二维码，手机 B 站 App 扫一下、点确认，Cookie 就自动存好了
-（`~/.bilifans_cookie`，权限 600），之后所有命令自动使用。
-不用开浏览器、不用开发者工具，走的是 B 站官方扫码接口。
+会弹出一个**独立 profile** 的 Chrome 窗口并直接打开登录页，你扫码登录一次，
+程序就把 Cookie（含 HttpOnly 的 SESSDATA）取回来存好（`~/.bilifans_cookie`，权限 600），
+**并且自动把这个号登记为监控对象**——不用再 `add`。
 
-> 网页看板里点 **「登录 B 站（扫码）」** 也行，二维码会弹在页面里，扫完自动刷新。
->
-> <img src="examples/gui_qr_login.png" width="520" alt="扫码登录">
->
-> 二维码只有 3 分钟有效（B 站规定）：弹窗上有倒计时，过期会变灰并**自动换一张**。
+登录状态记在那个 profile 里，下次再 `login` 一般不用重新扫码。
 
-不想用自动登录？手动取法：浏览器登录 <https://www.bilibili.com>，按 `F12` →
-**Application**（应用）→ **Cookies** → `https://www.bilibili.com`，找 **`SESSDATA`** 双击复制，
-然后 `export BILI_COOKIE='SESSDATA=...'`。
-
-验证（两种方式都适用）：
-
-```bash
-./bin/bilifans whoami    # 有效？登录的是哪个号？创作中心能不能读？
-```
+> 网页看板里点 **「登录 B 站」** 是同一个流程，日志会实时打在下方的框里。
 
 `whoami` 正常输出长这样：
 
@@ -332,7 +320,7 @@ export BILI_COOKIE='SESSDATA=...'
 
 页面上能做的事：
 
-- 左上角切账号，右上角切 **7 天 / 30 天**，点「刷新」重读本地数据
+- 右上角切 **7 天 / 30 天**，点「刷新」重读本地数据（只监控一个号，不再有账号切换）
 - 看 KPI、每日新增/流失柱状图、粉丝总数趋势
 - 点 **采一次快照 / 回填近 30 天 / 抓粉丝名单**，日志在按钮下方实时滚动
 - 看逐日明细和「谁取关了我」名单
@@ -341,8 +329,7 @@ export BILI_COOKIE='SESSDATA=...'
 
   <img src="examples/gui_fans.png" width="720" alt="粉丝名单">
 - **最近抓取记录**（采集区下方）：每次抓到多少人、是否完整，一眼看出抓取成没成功
-- **登录 B 站**：点按钮后二维码弹在页面里，手机扫完自动刷新；没登录时「回填 / 抓粉丝」会自动置灰
-- 右上角 **「+ 账号」** 直接添加要监控的 UID
+- **登录 B 站**：点按钮弹出浏览器窗口扫码，日志实时显示进度；没登录时「回填 / 抓粉丝」会自动置灰
 
 > 核对抓取是否成功就看两个地方：粉丝名单的总数对不对得上 B 站粉丝数；
 > 抓取记录里是「完整」还是「撞上上限」。
@@ -411,7 +398,7 @@ meta(k, v)                                            -- 杂项
 ## 6. 命令速查
 
 ```bash
-bilifans login                         # 打开浏览器扫码，自动取回并保存 Cookie
+bilifans login                         # 打开浏览器扫码，自动取回 Cookie 并登记账号
 bilifans serve [--port 8787]           # 打开网页看板（图形界面）
 bilifans install                       # 生成可双击的 App + 全局命令
 bilifans whoami                        # 检查 Cookie 有效性、确认登录的是哪个号
@@ -493,9 +480,7 @@ launchctl load ~/Library/LaunchAgents/com.bilifans.plist
 │   ├── http.py               # UA / Cookie / 重试退避
 │   ├── db.py                 # SQLite 读写（幂等）
 │   ├── stats.py              # 核心：按天聚合 + 估算 + 一致性校验
-│   ├── browser.py            # 兜底：用浏览器窗口取 Cookie（CDP over pipe）
-│   ├── login.py              # 扫码登录：申请二维码 → 轮询 → 换 Cookie
-│   ├── qr.py                 # 纯标准库的 QR 编码器（页面和终端共用）
+│   ├── browser.py            # 用浏览器窗口扫码取 Cookie（CDP over pipe）
 │   ├── service.py            # CLI 与网页共用的业务逻辑
 │   ├── server.py             # 网页看板（http.server + 单页前端）
 │   ├── shortcut.py           # 生成 .app / 全局命令的「一键启动」壳

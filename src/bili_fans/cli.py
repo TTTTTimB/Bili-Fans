@@ -134,7 +134,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("login", parents=[common], help="打开浏览器扫码登录，自动取回并保存 Cookie")
     sp.add_argument("--timeout", type=int, default=180, help="等待扫码的秒数，默认 180")
-    sp.add_argument("--browser", action="store_true", help="改用浏览器窗口登录（默认直接在终端打印二维码）")
     sp.add_argument("--headless", action="store_true", help="配合 --browser：不弹窗口")
     sp.add_argument("--profile", default="", help="浏览器 profile 目录，默认 ~/.bilifans/chrome-profile")
     sp.set_defaults(func=cmd_login)
@@ -433,7 +432,7 @@ def cmd_doctor(ctx: Ctx) -> int:
             say("             ⚠ 没有 buvid3，容易吃 -352；重新 login 会自动补上")
     else:
         say(f"  ✗ Cookie   没有（{COOKIE_FILE} 不存在）")
-        say("      → 运行 bilifans login，或打开看板点「登录 B 站（扫码）」")
+        say("      → 运行 bilifans login，或打开看板点「登录 B 站」")
         ok = False
 
     uid = accounts[0].uid if accounts else None
@@ -526,59 +525,7 @@ def cmd_install(ctx: Ctx) -> int:
 
 
 def cmd_login(ctx: Ctx) -> int:
-    if ctx.args.browser:
-        return _login_via_browser(ctx)
-    return _login_via_qr(ctx)
-
-
-def _login_via_qr(ctx: Ctx) -> int:
-    from . import login as qrlogin
-    from .browser import CookieResult, COOKIE_FILE, save_cookie
-    from .qr import encode
-
-    client = ctx.client()
-    try:
-        session = qrlogin.begin(client)
-    except (ApiError, HttpError) as exc:
-        print(f"✗ 拿不到二维码：{exc}", file=sys.stderr)
-        return 1
-
-    ctx.say("用手机 B 站 App 扫下面的二维码（首页右上角的「扫一扫」）：")
-    ctx.say("")
-    print(encode(session.url).ascii())
-    ctx.say("")
-
-    last = [0.0]
-
-    def on_tick(remaining: float, state: str) -> None:
-        now = time.time()
-        if now - last[0] < 5:
-            return
-        last[0] = now
-        ctx.say(f"  {qrlogin.describe(state)}…还剩 {int(remaining)} 秒")
-
-    state = qrlogin.wait(client, session, timeout=ctx.args.timeout, on_tick=on_tick)
-
-    if state.status == "confirmed":
-        cookie, values = qrlogin.finalize(client, state)
-        path = save_cookie(COOKIE_FILE, cookie)
-        shown = CookieResult(cookie=cookie, values=values, logged_in=True)
-        ctx.say("✓ 登录成功")
-        ctx.say(f"  {shown.masked}")
-        ctx.say(f"  已保存到 {path}（权限 600，只有你自己能读）")
-        ctx.say("")
-        ctx.say("  之后 sync / backfill / fans / serve 都会自动用它。")
-        return 0
-
-    if state.status == "expired":
-        print("✗ 二维码已过期，重新执行一次 bilifans login 即可", file=sys.stderr)
-        return 1
-
-    print(f"✗ 等了 {ctx.args.timeout} 秒还没扫码，重新执行一次 bilifans login", file=sys.stderr)
-    return 1
-
-
-def _login_via_browser(ctx: Ctx) -> int:
+    """打开浏览器窗口扫码登录，拿到 Cookie 后自动登记这个号。"""
     from .browser import COOKIE_FILE, PROFILE_DIR, BrowserError, capture_cookie, save_cookie
 
     profile = Path(ctx.args.profile).expanduser() if ctx.args.profile else PROFILE_DIR
@@ -586,14 +533,19 @@ def _login_via_browser(ctx: Ctx) -> int:
     ctx.say("  首次使用：在弹出的窗口里扫码登录 B 站（这个窗口的登录状态会被记住，下次不用再扫）")
     ctx.say("")
 
-    last_shown = [0.0]
+    last_shown = [0.0, ""]
+
+    def on_progress(text: str) -> None:
+        if text != last_shown[1]:
+            last_shown[1] = text
+            ctx.say(f"  {text}")
 
     def on_wait(remaining: float) -> None:
         now = time.time()
         if now - last_shown[0] < 5:
             return
         last_shown[0] = now
-        ctx.say(f"  等待登录…还剩 {int(remaining)} 秒")
+        ctx.say(f"  等待扫码…还剩 {int(remaining)} 秒")
 
     try:
         result = capture_cookie(
@@ -601,6 +553,7 @@ def _login_via_browser(ctx: Ctx) -> int:
             timeout=max(3, ctx.args.timeout),
             headless=ctx.args.headless,
             on_wait=on_wait,
+            on_progress=on_progress,
         )
     except BrowserError as exc:
         print(f"✗ {exc}", file=sys.stderr)
@@ -608,13 +561,30 @@ def _login_via_browser(ctx: Ctx) -> int:
         return 1
 
     path = save_cookie(COOKIE_FILE, result.cookie)
+    ctx.say("")
     ctx.say(f"✓ 已取回 Cookie（{len(result.names)} 个字段，用时 {result.seconds:.1f} 秒）")
     ctx.say(f"  {result.masked}")
     ctx.say(f"  已保存到 {path}（权限 600，只有你自己能读）")
+
+    # 顺手把登录的这个号登记进来，省得再去 add
+    uid, uname = _whoami_with_cookie(result.cookie)
+    if uid:
+        acc = upsert_account(ctx.conn, uid, uname, "")
+        ctx.say(f"✓ 已登记账号：{acc.label}")
+
     ctx.say("")
-    ctx.say("  之后 sync / backfill / fans / serve 都会自动用它，不用再设置环境变量。")
+    ctx.say("  之后 sync / backfill / fans / serve 都会自动用它。")
     ctx.say("  Cookie 过期时（报 -101）重新执行一次 bilifans login 即可。")
     return 0
+
+
+def _whoami_with_cookie(cookie: str) -> tuple[int, str]:
+    """用刚拿到的 Cookie 反查 UID 和昵称；失败就返回 (0, "")。"""
+    try:
+        client = BiliClient(Transport(cookie=cookie), cookie=cookie)
+        return client.me()
+    except (ApiError, HttpError):
+        return 0, ""
 
 
 def cmd_serve(ctx: Ctx) -> int:

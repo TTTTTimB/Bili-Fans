@@ -106,11 +106,11 @@ def test_overview_without_accounts(tmp_path):
     cfg = Config(db=str(db))
     conn = connect(db)
     try:
-        data = build_overview(conn, None, 30, cfg, TZ, "")
+        data = build_overview(conn, 30, cfg, TZ, "")
     finally:
         conn.close()
     assert data["empty"] == "no_account"
-    assert data["accounts"] == []
+    assert "accounts" not in data          # 已经取消了账号切换
 
 
 def test_unknown_uid_falls_back_to_first_account(env):
@@ -124,22 +124,6 @@ def test_days_is_clamped(env):
     status, body = request(env, "/api/overview?days=99999")
     assert status == 200
     assert json.loads(body)["days"] == 365
-
-
-def test_add_account(env):
-    status, body = request(env, "/api/account", method="POST", body={"uid": 777, "name": "新号"})
-    assert status == 200
-    result = json.loads(body)
-    assert result["uid"] == 777 and "新号" in result["label"]
-
-    status, body = request(env, "/api/overview")
-    assert {a["uid"] for a in json.loads(body)["accounts"]} == {100, 777}
-
-
-def test_add_account_rejects_bad_uid(env):
-    status, body = request(env, "/api/account", method="POST", body={"uid": "abc"})
-    assert status == 400
-    assert "UID" in json.loads(body)["error"]
 
 
 def test_run_job_requires_known_action(env):
@@ -240,117 +224,6 @@ def test_cookie_shows_up_without_restart(env, monkeypatch, tmp_path):
     assert json.loads(body)["cookie_ok"] is True
 
 
-def test_login_job_saves_cookie(env, monkeypatch, tmp_path):
-    """页面里点「登录」= 跑一遍 capture_cookie，并把结果写进登录缓存。"""
-    from bili_fans import browser
-
-    cookie_file = tmp_path / "cookie"
-    monkeypatch.setattr(browser, "COOKIE_FILE", cookie_file)
-    monkeypatch.delenv("BILI_COOKIE", raising=False)
-
-    def fake_capture(**kwargs):
-        kwargs["on_wait"](120)          # 让日志里有等待提示
-        return browser.CookieResult(
-            cookie="SESSDATA=secret; DedeUserID=123456789",
-            values={"SESSDATA": "secret", "DedeUserID": "123456789"},
-            logged_in=True,
-            seconds=4.2,
-        )
-
-    monkeypatch.setattr(browser, "capture_cookie", fake_capture)
-
-    status, body = request(env, "/api/run", method="POST", body={"action": "login"})
-    assert status == 200
-    job_id = json.loads(body)["job"]
-
-    for _ in range(60):
-        _, body = request(env, f"/api/job?id={job_id}")
-        job = json.loads(body)
-        if job["status"] != "running":
-            break
-        threading.Event().wait(0.05)
-
-    assert job["status"] == "done", job
-    text = "\n".join(job["lines"])
-    assert "等待扫码" in text
-    assert "已保存" in text
-    assert "secret" not in text            # 日志里不能出现完整 SESSDATA
-    assert cookie_file.exists()
-
-    _, body = request(env, "/api/overview")
-    assert json.loads(body)["cookie_ok"] is True
-
-
-def test_login_job_reports_browser_error(env, monkeypatch):
-    from bili_fans import browser
-
-    def boom(**kwargs):
-        raise browser.BrowserError("没找到 Chrome")
-
-    monkeypatch.setattr(browser, "capture_cookie", boom)
-    _, body = request(env, "/api/run", method="POST", body={"action": "login"})
-    job_id = json.loads(body)["job"]
-
-    for _ in range(60):
-        _, body = request(env, f"/api/job?id={job_id}")
-        job = json.loads(body)
-        if job["status"] != "running":
-            break
-        threading.Event().wait(0.05)
-
-    assert job["status"] == "done"
-    assert any("没找到 Chrome" in line for line in job["lines"])
-
-
-def test_qr_login_flow(env, monkeypatch, tmp_path):
-    """看板里的扫码登录：申请二维码 → 等待 → 确认 → 存 Cookie。"""
-    from bili_fans import browser
-    from bili_fans import login as qrlogin
-    from bili_fans.api import QRLoginState, QRSession
-
-    cookie_file = tmp_path / "cookie"
-    monkeypatch.setattr(browser, "COOKIE_FILE", cookie_file)
-    monkeypatch.delenv("BILI_COOKIE", raising=False)
-    session = qrlogin.LoginSession(
-        session=QRSession(key="k1", url="https://example.com/scan?qrcode_key=k1")
-    )
-    monkeypatch.setattr(qrlogin, "begin", lambda client: session)
-
-    status, body = request(env, "/api/login/qr", method="POST", body={})
-    assert status == 200
-    data = json.loads(body)
-    assert data["id"] and data["svg"].startswith("<svg")
-    sid = data["id"]
-
-    monkeypatch.setattr(qrlogin, "check", lambda client, s: QRLoginState(status="waiting"))
-    _, body = request(env, f"/api/login/qr?id={sid}")
-    assert json.loads(body)["status"] == "waiting"
-
-    monkeypatch.setattr(
-        qrlogin,
-        "check",
-        lambda client, s: QRLoginState(
-            status="confirmed", cookie="SESSDATA=abc; DedeUserID=42", values={"SESSDATA": "abc", "DedeUserID": "42"}
-        ),
-    )
-    _, body = request(env, f"/api/login/qr?id={sid}")
-    result = json.loads(body)
-    assert result["status"] == "confirmed" and result["uid"] == "42"
-    assert cookie_file.exists()
-
-    # B 站的码只能用一次，但前端可能并发/重试：结果要缓存住，
-    # 否则第二次轮询会拿到「已失效」，把已经成功的登录覆盖成失败。
-    status, body = request(env, f"/api/login/qr?id={sid}")
-    assert status == 200
-    again = json.loads(body)
-    assert again["status"] == "confirmed" and again["uid"] == "42"
-
-
-def test_qr_login_unknown_session(env):
-    status, body = request(env, "/api/login/qr?id=nope")
-    assert status == 404
-
-
 def test_health_endpoint_reports_version(env):
     status, body = request(env, "/api/health")
     assert status == 200
@@ -372,9 +245,3 @@ def test_overview_flags_stale_code(env, monkeypatch):
     assert json.loads(body)["meta"]["stale"] is True
 
 
-def test_login_store_done_cache_expires():
-    from bili_fans.server import LoginStore
-
-    store = LoginStore(done_ttl=0)
-    store.complete("sid", {"status": "confirmed"})
-    assert store.get_done("sid") is None      # 过期就不再返回
