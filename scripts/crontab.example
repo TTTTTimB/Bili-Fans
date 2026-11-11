@@ -1,0 +1,14 @@
+# 复制到 `crontab -e` 里，把 /你的路径 换成实际目录（路径里有中文没关系，别加引号）
+#
+# 每 5 分钟采一次总粉丝数 + 每小时回填官方数据（backfill 是幂等的，多跑无害）
+# sync 内部：poll（公开接口）+ backfill（创作中心，没配 Cookie 会自动跳过）
+
+*/5 * * * * cd /你的路径/Bili掉粉分析 && mkdir -p logs && ./bin/bilifans sync --all >> logs/cron.log 2>&1
+
+# 可选：每天 09:05 生成一份网页报告
+5 9 * * * cd /你的路径/Bili掉粉分析 && ./bin/bilifans export --all --days 30 >> logs/cron.log 2>&1
+
+# 注意：
+# 1. cron 不会读你 .zshrc 里的环境变量，Cookie 要么写在这行前面，要么用 launchd。
+#    例如：*/5 * * * * BILI_COOKIE='SESSDATA=xxx' cd /... && ./bin/bilifans sync --all
+# 2. macOS 的 cron 可能需要在「系统设置 → 隐私与安全 → 完全磁盘访问权限」里放行。

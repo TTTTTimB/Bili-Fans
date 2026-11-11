@@ -1,0 +1,16 @@
+#!/bin/sh
+# 免安装启动器：不用 pip install，直接 ./bin/bilifans <命令>
+# 也支持被软链到 ~/.local/bin（所以要先把软链解析成真实路径）
+set -e
+
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case $LINK in
+        /*) SELF=$LINK ;;
+        *)  SELF=$(dirname "$SELF")/$LINK ;;
+    esac
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+
+PYTHONPATH="$DIR/src${PYTHONPATH:+:$PYTHONPATH}" exec "${PYTHON:-python3}" -m bili_fans "$@"

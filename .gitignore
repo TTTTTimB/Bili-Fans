@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# 运行时产物：里面有你的账号数据和登录缓存，绝不能提交
+*.db
+*.db-wal
+*.db-shm
+reports/*.html
+logs/
+cookie.txt
+.ref/
+
+# 系统 / 编辑器
+.DS_Store
+.idea/
+.vscode/
+*.log

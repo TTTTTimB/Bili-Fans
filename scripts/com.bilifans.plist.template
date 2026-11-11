@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS 定时任务模板：
+    1. 把 /你的路径 换成实际绝对路径
+    2. 把 SESSDATA=... 换成你的 Cookie（不想要精确数据可以删掉整个 EnvironmentVariables）
+    3. cp 到 ~/Library/LaunchAgents/com.bilifans.sync.plist
+    4. launchctl load ~/Library/LaunchAgents/com.bilifans.sync.plist
+    5. 看日志：tail -f /你的路径/logs/cron.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bilifans.sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>cd "/你的路径/Bili掉粉分析" &amp;&amp; mkdir -p logs &amp;&amp; ./bin/bilifans sync --all >> logs/cron.log 2>&amp;1</string>
+    </array>
+
+    <!-- 每 300 秒跑一次 -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BILI_COOKIE</key>
+        <string>SESSDATA=你的SESSDATA</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/bilifans.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/bilifans.err</string>
+</dict>
+</plist>
