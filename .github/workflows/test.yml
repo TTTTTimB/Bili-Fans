@@ -21,4 +21,24 @@ jobs:
       - name: 安装测试依赖
         run: python -m pip install --upgrade pip pytest
       - name: 跑测试
-        run: python -m pytest -q
+        run: python -m pytest -q --tb=short 2>&1 | tee pytest.log
+      - name: 失败时把关键信息写到 Run 页面
+        if: failure()
+        run: |
+          {
+            echo "### 失败的用例（${{ matrix.os }} / Python ${{ matrix.python }}）"
+            echo '```'
+            grep -E "^(FAILED|ERROR)" pytest.log | head -30 || true
+            echo '```'
+            echo "### 最后 40 行"
+            echo '```'
+            tail -40 pytest.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: 上传完整日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-${{ matrix.os }}-${{ matrix.python }}
+          path: pytest.log
+          retention-days: 7
