@@ -90,6 +90,15 @@ class FakeCDP:
     def bring_to_front(self):
         self.front = True
 
+    def start_diagnostics(self):
+        pass
+
+    def login_box_visible(self):
+        return True
+
+    def failed_requests(self, limit=6):
+        return []
+
     def cookies(self):
         self.polls += 1
         base = [{"name": "buvid3", "value": "b3", "domain": ".bilibili.com"}]
@@ -205,3 +214,25 @@ def test_capture_brings_window_to_front(tmp_path):
 
 def test_default_url_is_login_page():
     assert br.DEFAULT_URL == "https://passport.bilibili.com/login"
+
+
+class NoLoginBox(FakeCDP):
+    def login_box_visible(self):
+        return False
+
+    def failed_requests(self, limit=6):
+        return [("https://s1.hdslb.com/x.js", "net::ERR_TIMED_OUT")]
+
+
+def test_capture_reports_missing_login_box(tmp_path):
+    """页面没渲染出登录框时，要把失败的资源打进进度日志。"""
+    FakeCDP.instances = []
+    lines = []
+    br.capture_cookie(
+        "/tmp/fake-profile", chrome="/fake/chrome", timeout=5, poll=0,
+        client_factory=lambda *a, **k: NoLoginBox(*a, **k),
+        on_progress=lines.append,
+    )
+    text = "\n".join(lines)
+    assert "没有渲染出登录框" in text
+    assert "ERR_TIMED_OUT" in text

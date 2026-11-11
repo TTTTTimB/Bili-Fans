@@ -442,6 +442,43 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
 
+        if path == "/api/cookie":
+            body = self._body()
+            text = str(body.get("text") or "").strip()
+            if not text:
+                self._json({"error": "内容为空"}, 400)
+                return
+            from . import browser
+            from .api import normalize_cookie
+
+            cookie = normalize_cookie(text)
+            value = ""
+            for part in cookie.split(";"):
+                key, _, val = part.strip().partition("=")
+                if key == "SESSDATA":
+                    value = val
+            if len(value) < 20:
+                self._json({"error": "SESSDATA 看起来不完整（正常有上百个字符），重新复制一次"}, 400)
+                return
+            try:
+                saved = browser.save_cookie(browser.COOKIE_FILE, cookie)
+            except OSError as exc:
+                self._json({"error": f"保存失败：{exc}"}, 500)
+                return
+            # 顺便登记账号
+            try:
+                mid, uname = BiliClient(Transport(cookie=cookie), cookie=cookie).me()
+                if mid:
+                    conn = self._db()
+                    try:
+                        upsert_account(conn, mid, uname, "")
+                    finally:
+                        conn.close()
+            except (ApiError, HttpError):
+                pass
+            self._json({"ok": True, "saved": str(saved)})
+            return
+
         if path == "/api/run":
             body = self._body()
             action = str(body.get("action") or "")
@@ -796,6 +833,24 @@ function renderWarmup(d) {
   return sec;
 }
 
+function pasteButton() {
+  const btn = el("button", "", "手动粘贴 Cookie");
+  btn.title = "浏览器扫码一直不行时，用这个直接粘贴 SESSDATA";
+  btn.onclick = async () => {
+    const raw = prompt("粘贴 SESSDATA 值或整段 Cookie（文档: docs/get-cookie.md）");
+    if (!raw || !raw.trim()) return;
+    try {
+      const r = await api("/api/cookie", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({text: raw}),
+      });
+      alert("已保存：" + r.saved);
+      await load();
+    } catch (e) { alert("保存失败：" + e.message); }
+  };
+  return btn;
+}
+
 function renderChurn(c) {
   const sec = el("section");
   sec.appendChild(el("h2", "", "谁取关了我"));
@@ -847,6 +902,8 @@ function renderActions(d) {
   login.onclick = () => runJob("login");
   box.appendChild(login);
   box.appendChild(mk("采一次快照", "poll", !needLogin));
+
+  box.appendChild(pasteButton());
 
   const backfill = mk("回填近 30 天官方数据", "backfill");
   const fans = mk("抓粉丝名单", "fans");

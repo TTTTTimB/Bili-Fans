@@ -245,3 +245,26 @@ def test_overview_flags_stale_code(env, monkeypatch):
     assert json.loads(body)["meta"]["stale"] is True
 
 
+
+
+def test_manual_cookie_paste(env, monkeypatch, tmp_path):
+    """扫码一直不行时的兜底：直接粘贴 Cookie。"""
+    from bili_fans import browser
+
+    cookie_file = tmp_path / "cookie"
+    monkeypatch.setattr(browser, "COOKIE_FILE", cookie_file)
+
+    status, body = request(env, "/api/cookie", method="POST",
+                           body={"text": "cookie: SESSDATA=abc123def456ghi789jkl; bili_jct=xyz"})
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+    assert cookie_file.read_text().strip() == "SESSDATA=abc123def456ghi789jkl; bili_jct=xyz"
+
+
+def test_manual_cookie_rejects_garbage(env, monkeypatch, tmp_path):
+    from bili_fans import browser
+
+    monkeypatch.setattr(browser, "COOKIE_FILE", tmp_path / "cookie")
+    status, body = request(env, "/api/cookie", method="POST", body={"text": "hello"})
+    assert status == 400
+    assert "SESSDATA" in json.loads(body)["error"]

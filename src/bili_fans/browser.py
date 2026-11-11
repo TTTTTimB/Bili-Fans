@@ -81,6 +81,7 @@ class ChromeCDP:
         self._in = -1
         self._out = -1
         self._session: str | None = None
+        self.events: list[dict] = []
 
     def build_args(self) -> list[str]:
         args = [
@@ -224,7 +225,10 @@ class ChromeCDP:
         while True:
             message = self._read(deadline)
             if message.get("id") != msg_id:
-                continue  # 事件消息，忽略
+                # 事件消息：留着，出问题时能看出哪个资源没加载出来
+                if len(self.events) < 400:
+                    self.events.append(message)
+                continue
             if "error" in message:
                 raise BrowserError(f"{method} 失败：{message['error'].get('message')}")
             return message.get("result", {})
@@ -249,6 +253,49 @@ class ChromeCDP:
             self.call("Page.navigate", {"url": url}, session=session, timeout=10)
         except (BrowserError, TimeoutError):
             pass
+
+    def start_diagnostics(self) -> None:
+        session = self._session or self.attach_page()
+        for domain in ("Network", "Log", "Runtime"):
+            try:
+                self.call(f"{domain}.enable", session=session, timeout=5)
+            except (BrowserError, TimeoutError):
+                pass
+
+    def failed_requests(self, limit: int = 6) -> list[tuple[str, str]]:
+        urls: dict[str, str] = {}
+        failed: list[tuple[str, str]] = []
+        for event in self.events:
+            method = event.get("method")
+            params = event.get("params") or {}
+            if method == "Network.requestWillBeSent":
+                urls[params.get("requestId", "")] = (params.get("request") or {}).get("url", "")
+            elif method == "Network.loadingFailed":
+                rid = params.get("requestId", "")
+                failed.append((urls.get(rid, "?"), str(params.get("errorText") or "")))
+            elif method == "Log.entryAdded":
+                entry = params.get("entry") or {}
+                if entry.get("level") == "error":
+                    failed.append((str(entry.get("url") or ""), str(entry.get("text") or "")))
+        return failed[:limit]
+
+    def login_box_visible(self) -> bool:
+        """登录框出来没有：有二维码 canvas 或页面里有「扫码登录」字样。"""
+        session = self._session or self.attach_page()
+        try:
+            result = self.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "document.querySelectorAll('canvas').length > 0 || "
+                                  "document.body.innerText.includes('扫码登录')",
+                    "returnByValue": True,
+                },
+                session=session,
+                timeout=5,
+            )
+        except (BrowserError, TimeoutError):
+            return False
+        return result.get("result", {}).get("value") is True
 
     def bring_to_front(self) -> None:
         """把窗口提到最前，避免 macOS 判定「被遮挡」而暂停渲染。"""
@@ -378,12 +425,21 @@ def capture_cookie(
     with client_factory(browser, Path(profile_dir), url=url, headless=headless, timeout=30) as cdp:
         progress("浏览器已启动，正在打开登录页…")
         cdp.attach_page()
+        cdp.start_diagnostics()
         cdp.navigate(url)  # 失败也无所谓，cookie 照样能读
         cdp.bring_to_front()
         if cdp.wait_ready(timeout=20):
             progress("登录页加载完成，等待扫码…")
         else:
             progress("登录页加载较慢，已经开始等扫码…")
+
+        # 页面渲染出来后自检一次：登录框没出来就把失败资源打出来
+        time.sleep(1.0)
+        if not cdp.login_box_visible():
+            progress("⚠ 页面没有渲染出登录框，可能是下面这些资源没加载成功：")
+            for url, reason in cdp.failed_requests():
+                progress(f"    {reason or '失败'}  {url[:110]}")
+            progress("  可以在浏览器里手动刷新一次；仍然不行请把这段日志发出来")
         deadline = started + timeout
         while True:
             try:
