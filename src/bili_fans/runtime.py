@@ -10,10 +10,31 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 APP_DIR = Path.home() / ".bilifans"
+
+
+def data_dir() -> Path:
+    """数据目录：放在系统规定的地方，不跟代码混在一起。
+
+    macOS  -> ~/Library/Application Support/bilifans
+    Linux  -> $XDG_DATA_HOME/bilifans（默认 ~/.local/share/bilifans）
+    其他   -> ~/.bilifans
+    """
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA") or Path.home())
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    return base / "bilifans"
+
+
+def default_db_path() -> Path:
+    return data_dir() / "bilifans.db"
 PID_FILE = APP_DIR / "serve.pid"
 
 # 只杀「看起来是我们自己的」进程：命令行里必须出现这个标记

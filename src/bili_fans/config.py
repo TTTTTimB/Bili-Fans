@@ -16,7 +16,8 @@ USER_CONFIG = Path.home() / ".config" / "bilifans" / "config.toml"
 
 @dataclass
 class Config:
-    db: str = "bilifans.db"
+    # 空字符串 = 用系统应用数据目录里的默认库（不放项目目录里）
+    db: str = ""
     timezone: str = DEFAULT_TZ
     timeout: float = 15.0
     retries: int = 3
@@ -30,6 +31,10 @@ class Config:
         return os.environ.get(self.cookie_env, "").strip()
 
     def db_path(self) -> Path:
+        if not self.db:
+            from .runtime import default_db_path
+
+            return default_db_path()
         p = Path(self.db).expanduser()
         if not p.is_absolute():
             base = self.source_path.parent if self.source_path else Path.cwd()

@@ -382,7 +382,38 @@ export BILI_COOKIE='SESSDATA=...'
 
 ---
 
-## 5. 数据表
+## 5. 数据存在哪
+
+**默认不在项目目录里**（避免被 git 带上），路径按系统习惯：
+
+| 系统 | 数据库 |
+|---|---|
+| macOS | `~/Library/Application Support/bilifans/bilifans.db` |
+| Linux | `~/.local/share/bilifans/bilifans.db` |
+| 其它 | `~/.bilifans/bilifans.db` |
+
+其它东西的位置：
+
+| 内容 | 路径 |
+|---|---|
+| 登录 Cookie | `~/.bilifans_cookie` |
+| 浏览器 profile | `~/.bilifans/chrome-profile` |
+| 运行日志 | `~/.bilifans/app.log` |
+
+随时可以查：
+
+```bash
+bilifans where
+```
+
+> **升级说明**：老版本把库放在项目目录的 `bilifans.db`。
+> 新版第一次运行时会**自动迁移**到上面那个位置（连 `-wal` 一起搬），数据不会丢，
+> 项目目录也不会再留下数据文件。
+>
+> **数据是落盘的**：看板服务重启、关机、重装都不会丢，只有删掉那个 `.db` 才会丢。
+> 备份时把 `.db` 和同名 `-wal` 一起拷走（服务在跑时数据可能还在 `-wal` 里）。
+
+## 6. 数据表
 
 ```sql
 account(uid, name, note, added_at)                    -- 监听列表
@@ -407,13 +438,14 @@ meta(k, v)                                            -- 杂项
 
 ---
 
-## 6. 命令速查
+## 7. 命令速查
 
 ```bash
 bilifans login                         # 打开浏览器扫码，自动取回 Cookie 并登记账号
 bilifans serve [--port 8787] [--restart]  # 打开网页看板；--restart 先停旧服务再起新的
 bilifans install                       # 生成可双击的 App + 全局命令
 bilifans whoami                        # 检查 Cookie 有效性、确认登录的是哪个号
+bilifans where                         # 数据都存哪了（数据库 / Cookie / profile / 日志）
 bilifans doctor                        # 逐项体检：Cookie / 公开接口 / 登录态 / 创作中心 / 粉丝列表
 bilifans add <UID> [--name 昵称]      # 添加账号
 bilifans list                          # 看监听列表、最近采样
@@ -440,7 +472,7 @@ bilifans seed-demo                     # 灌演示数据，先看效果
 
 ---
 
-## 7. 定时任务模板
+## 8. 定时任务模板
 
 **cron**（见 `scripts/crontab.example`）：
 
@@ -460,7 +492,7 @@ launchctl load ~/Library/LaunchAgents/com.bilifans.plist
 
 ---
 
-## 8. 已知限制 / 注意事项
+## 9. 已知限制 / 注意事项
 
 1. **Cookie 就是登录态**，等同于密码；只用自己的，别贴到群里或提交仓库。
    取法见 [docs/get-cookie.md](docs/get-cookie.md)，验证用 `bilifans whoami`。
@@ -484,7 +516,7 @@ launchctl load ~/Library/LaunchAgents/com.bilifans.plist
 
 ---
 
-## 9. 项目结构
+## 10. 项目结构
 
 ```
 .
@@ -509,7 +541,7 @@ launchctl load ~/Library/LaunchAgents/com.bilifans.plist
 └── bilifans.toml.example     # 配置模板
 ```
 
-## 10. 开发
+## 11. 开发
 
 ```bash
 PYTHONPATH=src python3 -m pytest -q
@@ -522,7 +554,7 @@ PYTHONPATH=src python3 -m pytest -q
 
 ---
 
-## 11. 免责声明
+## 12. 免责声明
 
 - 本项目**只读取数据和做统计**，不会点赞、评论、关注、发私信，也不会修改你的账号。
 - 所有请求都发往 `*.bilibili.com`，不经过任何第三方服务器；Cookie 只存在你本机。
@@ -531,7 +563,7 @@ PYTHONPATH=src python3 -m pytest -q
 - 请遵守 [哔哩哔哩用户协议](https://www.bilibili.com/protocal/licence.html)，
   因使用本项目产生的任何后果由使用者自负。
 
-## 12. 许可证
+## 13. 许可证
 
 [MIT](LICENSE) —— 随便用、随便改，保留版权声明即可。
 
@@ -543,7 +575,7 @@ PYTHONPATH=src python3 -m pytest -q
 | [fans.py](src/bili_fans/fans.py) | 取关检测的比对逻辑和防误判 |
 | [api.py](src/bili_fans/api.py) | 所有 B 站接口和字段，改版时只需要动这里 |
 
-## 13. 一句话总结
+## 14. 一句话总结
 
 > **总粉丝数负责「净增 + 高频行情」，创作中心负责「新增 / 掉粉的真相」。**
 > 两个源叠在一起，才有每天完整的进出账。

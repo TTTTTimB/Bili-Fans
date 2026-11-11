@@ -124,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cookie", default="", help="用于判断报告里是否标注为精确数据")
     sp.set_defaults(func=cmd_export)
 
+    sp = sub.add_parser("where", parents=[common], help="看数据都存哪了（数据库、登录缓存、浏览器 profile）")
+    sp.set_defaults(func=cmd_where)
+
     sp = sub.add_parser("doctor", parents=[common], help="逐项体检：Cookie、接口、风控，定位到底哪一步不通")
     sp.add_argument("--cookie", default="")
     sp.set_defaults(func=cmd_doctor)
@@ -194,9 +197,45 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+LEGACY_DB = "bilifans.db"
+
+
+def migrate_legacy_db(cfg: Config, say=None) -> str | None:
+    """老版本把库放在项目目录里；现在搬到应用数据目录，顺手迁过去。
+
+    只有「用户没显式指定 db」时才迁移。
+    """
+    import shutil
+
+    if cfg.db:
+        return None
+    target = cfg.db_path()
+    if target.exists():
+        return None
+    legacy = Path.cwd() / LEGACY_DB
+    if not legacy.exists():
+        return None
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        src = Path(str(legacy) + suffix)
+        if not src.exists():
+            continue
+        dst = Path(str(target) + suffix)
+        try:
+            shutil.move(str(src), str(dst))
+        except OSError:
+            shutil.copy2(src, dst)
+            src.unlink(missing_ok=True)
+    if say:
+        say(f"已把数据迁移到 {target}（不再放在项目目录里）")
+    return str(target)
+
+
 class Ctx:
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        self.quiet = bool(getattr(args, "quiet", False))
         self.cfg: Config = load_config(getattr(args, "config", None))
         db = getattr(args, "db", None)
         if db:
@@ -205,9 +244,9 @@ class Ctx:
         if tz:
             self.cfg.timezone = tz
         self.tz = get_tz(self.cfg.timezone)
+        migrate_legacy_db(self.cfg, say=self.say)
         self.conn = connect(self.cfg.db_path())
         self.cookie, self.cookie_source = resolve_cookie(self.cfg, getattr(args, "cookie", ""))
-        self.quiet = bool(getattr(args, "quiet", False))
 
     def say(self, text: str = "") -> None:
         if not self.quiet:
@@ -410,6 +449,28 @@ def _explain(exc: Exception) -> str:
     code = getattr(exc, "code", None)
     hint = HINTS.get(code)
     return f"{exc}" + (f"\n      → {hint}" if hint else "")
+
+
+def cmd_where(ctx: Ctx) -> int:
+    """所有落盘位置一览，方便备份或确认没混进仓库。"""
+    from .browser import COOKIE_FILE, PROFILE_DIR
+
+    db = ctx.cfg.db_path()
+    rows = [
+        ("数据库（粉丝/快照/涨跌）", db),
+        ("登录 Cookie", COOKIE_FILE),
+        ("浏览器 profile", PROFILE_DIR),
+        ("PID 文件", Path.home() / ".bilifans" / "serve.pid"),
+        ("App 日志", Path.home() / ".bilifans" / "app.log"),
+    ]
+    ctx.say("数据存放位置")
+    for label, path in rows:
+        mark = "✓" if Path(path).exists() else "·"
+        ctx.say(f"  {mark} {label:<22} {path}")
+    ctx.say("")
+    ctx.say("  以上都不在项目目录里，git 不会带上它们。")
+    ctx.say("  备份：把数据库那个文件拷走即可（服务在跑时建议连 -wal 一起拷）。")
+    return 0
 
 
 def cmd_doctor(ctx: Ctx) -> int:
